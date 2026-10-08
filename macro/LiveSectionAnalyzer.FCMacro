@@ -1,1 +1,1198 @@
-# Launcher
+"""LiveSectionAnalyzer.FCMacro
+
+Interactive, real-time section analysis for FreeCAD.
+Select a solid, run the macro, and move the section plane with a slider,
+a spin box or by dragging a gizmo directly in the 3D view.
+
+Version: 0.3
+Author: Sedat Kuran
+License: MIT (see LICENSE)
+Repository: https://github.com/sedatkrn/FreeCAD-LiveSectionAnalyzer
+Copyright (c) 2026 Sedat Kuran
+"""
+
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import math
+
+from PySide.QtWidgets import (
+    QColorDialog, QDockWidget, QDoubleSpinBox, QMessageBox, QLabel, QCheckBox,
+    QRadioButton, QPushButton, QSlider, QSpinBox, QWidget,
+    QHBoxLayout, QVBoxLayout,
+)
+
+from PySide.QtCore import Qt, QTimer, QObject, QEvent
+
+try:
+    from pivy import coin
+    HAS_COIN = True
+except Exception:
+    coin = None
+    HAS_COIN = False
+
+# If the wrong half of the object is clipped away, flip this value.
+CLIP_KEEP_NEGATIVE = True
+
+# Safety limit for the number of hatch lines generated per update.
+MAX_HATCH_LINES = 1500
+
+# Max cached slices.
+SLICE_CACHE_SIZE = 64
+
+
+class _GizmoEventFilter(QObject):
+    """Qt event filter: forwards mouse events of the 3D view to the gizmo."""
+
+    def __init__(self, gizmo):
+        super().__init__()
+        self.gizmo = gizmo
+
+    def eventFilter(self, obj, ev):
+        try:
+            return bool(self.gizmo.handle_qt_event(ev))
+        except Exception as e:
+            App.Console.PrintError(f"Gizmo error: {e}\n")
+            return False
+
+
+class PlaneGizmo:
+    """Double-headed arrow + plane outline, draggable along the plane normal.
+
+    Dragging is implemented with a Qt event filter on the 3D viewport. It sees
+    mouse events before FreeCAD's navigation/selection code, so a drag on the
+    arrow neither rotates the view nor changes the selection.
+    """
+    PICK_PIXELS = 16
+    COLOR = (1.0, 0.55, 0.0)
+    COLOR_HOT = (1.0, 0.9, 0.2)
+
+    def __init__(self, view, size, on_start, on_drag, on_end):
+        self.view = view
+        self.viewer = view.getViewer()
+        self.widget = view.graphicsView().viewport()
+        self.size = size
+        self.on_start = on_start
+        self.on_drag = on_drag
+        self.on_end = on_end
+
+        self.origin = App.Vector(0, 0, 0)
+        self.normal = App.Vector(0, 1, 0)
+        self.dragging = False
+        self.hot = False
+        self._anchor = None
+        self._grab_t = 0.0
+        self._removed = False
+
+        self._build_scene()
+        self.sg = self._render_group(view.getSceneGraph())
+        self.sg.addChild(self.root)
+
+        self._filter = _GizmoEventFilter(self)
+        self.widget.installEventFilter(self._filter)
+
+    # -- scene ---------------------------------------------------------
+    @staticmethod
+    def _render_group(sg):
+        """Node that is actually rendered. Newer FreeCAD builds return a parent
+        separator from getSceneGraph() and ignore children appended after the
+        selection root, so attach to the SoFCUnifiedSelection node itself."""
+        if sg.getTypeId().getName() == "SoFCUnifiedSelection":
+            return sg
+        for i in range(sg.getNumChildren()):
+            child = sg.getChild(i)
+            if child.getTypeId().getName() == "SoFCUnifiedSelection":
+                return child
+        return sg
+
+    def _build_scene(self):
+        L = self.size
+        r = L * 0.035
+        head_r = L * 0.11
+        head_h = L * 0.26
+        self.reach = L + head_h
+
+        # SoAnnotation renders after the scene with depth test off, so the gizmo
+        # stays visible even behind semi-transparent geometry
+        self.root = coin.SoAnnotation()
+        self.switch = coin.SoSwitch()
+        self.switch.whichChild.setValue(coin.SO_SWITCH_ALL)
+        self.root.addChild(self.switch)
+
+        grp = coin.SoSeparator()
+        self.switch.addChild(grp)
+
+        # never let FreeCAD's selection / preselection pick the gizmo
+        pick = coin.SoPickStyle()
+        pick.style.setValue(coin.SoPickStyle.UNPICKABLE)
+        grp.addChild(pick)
+
+        lm = coin.SoLightModel()
+        lm.model.setValue(coin.SoLightModel.BASE_COLOR)
+        grp.addChild(lm)
+
+        self.tf = coin.SoTransform()
+        grp.addChild(self.tf)
+
+        self.color = coin.SoBaseColor()
+        self.color.rgb.setValue(*self.COLOR)
+
+        # plane outline (lies in the local XZ plane, local Y = normal)
+        outline = coin.SoSeparator()
+        grp.addChild(outline)
+        outline.addChild(self.color)
+        ds = coin.SoDrawStyle()
+        ds.lineWidth.setValue(2.0)
+        outline.addChild(ds)
+        self.coords = coin.SoCoordinate3()
+        outline.addChild(self.coords)
+        ls = coin.SoIndexedLineSet()
+        ls.coordIndex.setValues(0, 6, [0, 1, 2, 3, 0, -1])
+        outline.addChild(ls)
+        self.set_extents(L, L)
+
+        # arrow, drawn on top of everything
+        arrow = coin.SoSeparator()
+        grp.addChild(arrow)
+        depth = coin.SoDepthBuffer()
+        depth.test.setValue(False)
+        arrow.addChild(depth)
+        arrow.addChild(self.color)
+
+        shaft = coin.SoCylinder()
+        shaft.radius.setValue(r)
+        shaft.height.setValue(2 * L)
+        arrow.addChild(shaft)
+
+        for sign in (1, -1):
+            sep = coin.SoSeparator()
+            t = coin.SoTransform()
+            t.translation.setValue(0, sign * (L + head_h / 2), 0)
+            if sign < 0:
+                t.rotation.setValue(coin.SbRotation(coin.SbVec3f(1, 0, 0), math.pi))
+            sep.addChild(t)
+            cone = coin.SoCone()
+            cone.bottomRadius.setValue(head_r)
+            cone.height.setValue(head_h)
+            sep.addChild(cone)
+            arrow.addChild(sep)
+
+    def set_extents(self, half_u, half_w):
+        pts = [(-half_u, 0, -half_w), (half_u, 0, -half_w),
+               (half_u, 0, half_w), (-half_u, 0, half_w)]
+        self.coords.point.setValues(0, 4, pts)
+
+    def set_pose(self, origin, normal, u_axis):
+        """origin/normal/u_axis are App.Vector; local X -> u, local Y -> normal."""
+        self.normal = App.Vector(normal)
+        n = App.Vector(normal)
+        u = App.Vector(u_axis)
+        w = u.cross(n)
+        m = App.Matrix()
+        m.A11, m.A21, m.A31 = u.x, u.y, u.z
+        m.A12, m.A22, m.A32 = n.x, n.y, n.z
+        m.A13, m.A23, m.A33 = w.x, w.y, w.z
+        q = App.Rotation(m).Q
+        self.tf.rotation.setValue(coin.SbRotation(q[0], q[1], q[2], q[3]))
+        self._set_origin(origin)
+
+    def _set_origin(self, origin):
+        self.origin = App.Vector(origin)
+        self.tf.translation.setValue(origin.x, origin.y, origin.z)
+
+    def set_visible(self, flag):
+        self.switch.whichChild.setValue(coin.SO_SWITCH_ALL if flag else coin.SO_SWITCH_NONE)
+
+    def is_visible(self):
+        return self.switch.whichChild.getValue() != coin.SO_SWITCH_NONE
+
+    # -- picking math (x, y: widget pixels, origin top-left) ------------
+    def _volume(self):
+        rm = self.viewer.getSoRenderManager()
+        vp = rm.getViewportRegion()
+        return rm.getCamera().getViewVolume(vp.getViewportAspectRatio())
+
+    def _norm(self, x, y):
+        return coin.SbVec2f(x / max(self.widget.width(), 1),
+                            1.0 - y / max(self.widget.height(), 1))
+
+    def hit_test(self, x, y):
+        vv = self._volume()
+        w, h = self.widget.width(), self.widget.height()
+
+        def to_px(p):
+            s = vv.projectToScreen(coin.SbVec3f(p.x, p.y, p.z)).getValue()
+            return s[0] * w, (1.0 - s[1]) * h
+
+        ax, ay = to_px(self.origin - self.normal * self.reach)
+        bx, by = to_px(self.origin + self.normal * self.reach)
+        dx, dy = bx - ax, by - ay
+        seg2 = dx * dx + dy * dy
+        if seg2 < 1e-6:
+            t = 0.0
+        else:
+            t = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / seg2))
+        return math.hypot(x - (ax + t * dx), y - (ay + t * dy)) <= self.PICK_PIXELS
+
+    def _axis_param(self, x, y, anchor):
+        """t of the axis point (anchor + t*normal) closest to the mouse ray."""
+        p0, p1 = self._volume().projectPointToLine(self._norm(x, y))
+        q0 = App.Vector(*p0.getValue())
+        d = App.Vector(*p1.getValue()) - q0
+        n = self.normal
+        w0 = anchor - q0
+        b = n.dot(d)
+        c = d.dot(d)
+        denom = c - b * b            # n.n == 1
+        if abs(denom) < 1e-9 * max(c, 1.0):
+            return None              # looking straight along the axis
+        return (b * d.dot(w0) - c * n.dot(w0)) / denom
+
+    def _set_hot(self, flag):
+        if flag != self.hot:
+            self.hot = flag
+            self.color.rgb.setValue(*(self.COLOR_HOT if flag else self.COLOR))
+
+    # -- Qt events -----------------------------------------------------
+    @staticmethod
+    def _pos(ev):
+        p = ev.position() if hasattr(ev, "position") else ev.pos()
+        return p.x(), p.y()
+
+    def handle_qt_event(self, ev):
+        """Returns True when the event was consumed."""
+        if self._removed:
+            return False
+        et = ev.type()
+
+        if et == QEvent.MouseButtonPress:
+            if ev.button() != Qt.LeftButton or ev.modifiers() != Qt.NoModifier:
+                return False
+            if not self.is_visible():
+                return False
+            x, y = self._pos(ev)
+            if not self.hit_test(x, y):
+                return False
+            t = self._axis_param(x, y, self.origin)
+            if t is None:
+                return False
+            self.dragging = True
+            self._anchor = App.Vector(self.origin)
+            self._grab_t = t
+            self._set_hot(True)
+            self.on_start()
+            return True
+
+        if et == QEvent.MouseMove:
+            x, y = self._pos(ev)
+            if self.dragging:
+                t = self._axis_param(x, y, self._anchor)
+                if t is not None:
+                    applied = self.on_drag(t - self._grab_t)
+                    self._set_origin(self._anchor + self.normal * applied)
+                return True
+            if self.is_visible() and not ev.buttons():
+                self._set_hot(self.hit_test(x, y))
+            return False
+
+        if et == QEvent.MouseButtonRelease and self.dragging:
+            self.dragging = False
+            self._set_hot(False)
+            self.on_end()
+            return True
+
+        return False
+
+    # -- cleanup -------------------------------------------------------
+    def remove(self):
+        if self._removed:
+            return
+        self._removed = True
+        self.dragging = False
+        try:
+            self.widget.removeEventFilter(self._filter)
+        except Exception:
+            pass
+        try:
+            self.sg.removeChild(self.root)
+        except Exception:
+            pass
+
+
+class LiveSectionAnalyzer(QDockWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Interactive Section Analysis")
+        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+
+        self._closed = False
+        self.base_obj = None
+        self.section_feat = None
+        self.edge_feat = None
+        self.hatch_feat = None
+        self.bg_feat = None
+        self.frozen_group = None
+        self.clip = None
+        self.clip_parent = None
+        self.clip_ok = False
+        self._bg_mode = None          # "clip" or "solid"
+        self.gizmo = None
+        self._gizmo_dragging = False
+        self._gizmo_start_offset = 0.0
+        self._slice_cache = {}
+        self.init_done = False
+
+        self.base_obj = self.get_selection()
+        if not self.base_obj:
+            self._closed = True
+            return
+
+        self.bbox = self.base_obj.Shape.BoundBox
+
+        self.x_len = self.bbox.XMax - self.bbox.XMin
+        self.y_len = self.bbox.YMax - self.bbox.YMin
+        self.z_len = self.bbox.ZMax - self.bbox.ZMin
+
+        # Debounce timer: many UI events -> a single update
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(60)
+        self._timer.timeout.connect(self.update_section)
+
+        # Features first: init_ui() needs to know whether GPU clipping is available
+        self.create_features()
+        self.init_ui()
+        self.create_gizmo()
+        self.update_style()
+        self.update_section()
+        self.init_done = True
+
+    # ------------------------------------------------------------------
+    # Setup
+    # ------------------------------------------------------------------
+    def get_selection(self):
+        sel = Gui.Selection.getSelection()
+        if not sel:
+            QMessageBox.warning(None, "Error", "Please select a part from the Tree View first!")
+            return None
+        obj = sel[0]
+        if not hasattr(obj, "Shape") or obj.Shape.isNull():
+            QMessageBox.warning(None, "Error", "Selected object has no valid shape!")
+            return None
+        return obj
+
+    def create_features(self):
+        """Create all features once"""
+        doc = App.ActiveDocument
+        if not doc:
+            return
+
+        # Background object
+        self.bg_feat = doc.addObject("Part::Feature", "Live_Section_Background")
+        self.bg_feat.ViewObject.ShapeColor = self.base_obj.ViewObject.ShapeColor
+        self.bg_feat.ViewObject.DisplayMode = "Shaded"
+        self.bg_feat.ViewObject.Transparency = 70
+
+        # Section fill
+        self.section_feat = doc.addObject("Part::Feature", "Live_Section_Fill")
+        self.section_feat.ViewObject.ShapeColor = (0.75, 0.65, 0.68)
+        self.section_feat.ViewObject.LineColor = (0.0, 0.0, 0.0)
+        self.section_feat.ViewObject.LineWidth = 3.0
+        self.section_feat.ViewObject.DisplayMode = "Shaded"
+        self.section_feat.ViewObject.Transparency = 0
+        self.section_feat.ViewObject.Visibility = False
+
+        # Section edge lines
+        self.edge_feat = doc.addObject("Part::Feature", "Live_Section_Edges")
+        self.edge_feat.ViewObject.LineColor = (0.0, 0.0, 0.0)
+        self.edge_feat.ViewObject.LineWidth = 2.0
+        self.edge_feat.ViewObject.DisplayMode = "Wireframe"
+        self.edge_feat.ViewObject.Visibility = False
+        self.edge_feat.ViewObject.PointSize = 1
+
+        # Hatch lines
+        self.hatch_feat = doc.addObject("Part::Feature", "Live_Hatch_Lines")
+        self.hatch_feat.ViewObject.LineColor = (0.3, 0.3, 0.3)
+        self.hatch_feat.ViewObject.LineWidth = 1.0
+        self.hatch_feat.ViewObject.DisplayMode = "Wireframe"
+        self.hatch_feat.ViewObject.Visibility = False
+        self.hatch_feat.ViewObject.PointSize = 1
+
+        # GPU clip plane attached to the background object's scene graph
+        if HAS_COIN:
+            try:
+                self.clip = coin.SoClipPlane()
+                self.clip.on.setValue(False)
+                self.clip_parent = self.bg_feat.ViewObject.RootNode
+                self.clip_parent.insertChild(self.clip, 0)
+                self.clip_ok = True
+            except Exception as e:
+                App.Console.PrintWarning(f"Clip plane unavailable, using boolean mode: {e}\n")
+                self.clip = None
+                self.clip_parent = None
+                self.clip_ok = False
+
+        for feat in (self.bg_feat, self.section_feat, self.edge_feat, self.hatch_feat):
+            feat.purgeTouched()
+
+    def init_ui(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        # --- SECTION PLANE ---
+        layout.addWidget(QLabel("<b>Section Plane:</b>"))
+        self.radio_xy = QRadioButton("XY Plane")
+        self.radio_xz = QRadioButton("XZ Plane")
+        self.radio_yz = QRadioButton("YZ Plane (Default)")
+        self.radio_yz.setChecked(True)
+
+        layout.addWidget(self.radio_xy)
+        layout.addWidget(self.radio_xz)
+        layout.addWidget(self.radio_yz)
+
+        self.chk_gizmo = QCheckBox("Show plane gizmo (drag the arrow in the 3D view)")
+        self.chk_gizmo.setChecked(True)
+        self.chk_gizmo.stateChanged.connect(self.on_gizmo_toggled)
+        layout.addWidget(self.chk_gizmo)
+
+        # --- OFFSET ---
+        layout.addWidget(QLabel("<b>Offset (Position):</b>"))
+
+        max_dim = max(self.x_len, self.y_len, self.z_len)
+        self.offset_range = max(max_dim * 0.6, 10.0)
+
+        offset_layout = QHBoxLayout()
+
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setRange(-100, 100)
+        self.slider.setValue(0)
+        self.slider.setTickPosition(QSlider.TicksBelow)
+        self.slider.setTickInterval(10)
+        offset_layout.addWidget(self.slider)
+
+        self.offset_spin = QDoubleSpinBox()
+        self.offset_spin.setRange(-self.offset_range, self.offset_range)
+        self.offset_spin.setValue(0.0)
+        self.offset_spin.setSingleStep(self.offset_range / 20.0)
+        self.offset_spin.setSuffix(" mm")
+        self.offset_spin.setDecimals(1)
+        self.offset_spin.setMaximumWidth(100)
+        offset_layout.addWidget(self.offset_spin)
+
+        layout.addLayout(offset_layout)
+
+        range_label = QLabel(f"<i>Offset range: ±{self.offset_range:.1f} mm (based on object size)</i>")
+        range_label.setStyleSheet("color: #666; font-size: 10px;")
+        layout.addWidget(range_label)
+
+        # --- BACKGROUND SETTINGS ---
+        layout.addWidget(QLabel("<b>Background Settings:</b>"))
+
+        trans_layout = QHBoxLayout()
+        trans_layout.addWidget(QLabel("Transparency (%):"))
+        self.spin_trans = QSpinBox()
+        self.spin_trans.setRange(0, 100)
+        self.spin_trans.setValue(70)
+        trans_layout.addWidget(self.spin_trans)
+        trans_layout.addStretch()
+        layout.addLayout(trans_layout)
+
+        # GPU clip toggle
+        gpu_layout = QHBoxLayout()
+        self.chk_gpu_clip = QCheckBox("Fast GPU clipping")
+        self.chk_gpu_clip.setChecked(self.clip_ok)
+        self.chk_gpu_clip.setEnabled(self.clip_ok)
+        self.chk_gpu_clip.setToolTip(
+            "Clips the object on the GPU (fast). When off, an exact boolean "
+            "cut is computed instead (slower, but real geometry)."
+        )
+        gpu_layout.addWidget(self.chk_gpu_clip)
+        gpu_layout.addStretch()
+        layout.addLayout(gpu_layout)
+
+        mirror_layout = QHBoxLayout()
+        self.chk_mirror_bg = QCheckBox("Mirror Background (show opposite half)")
+        self.chk_mirror_bg.setChecked(False)
+        mirror_layout.addWidget(self.chk_mirror_bg)
+        mirror_layout.addStretch()
+        layout.addLayout(mirror_layout)
+
+        # --- SECTION FILL ---
+        layout.addWidget(QLabel("<b>Section Fill:</b>"))
+
+        # With GPU clipping the cut is open, so the fill acts as the cap: default on.
+        self.chk_section_fill = QCheckBox("Show Section Fill")
+        self.chk_section_fill.setChecked(True)
+        layout.addWidget(self.chk_section_fill)
+
+        fill_color_layout = QHBoxLayout()
+        fill_color_layout.addWidget(QLabel("Color:"))
+        self.fill_color_btn = QPushButton()
+        self.fill_color_btn.setStyleSheet("background-color: rgb(191, 166, 173); max-width: 50px;")
+        self.fill_color_btn.clicked.connect(lambda: self.pick_color(self.fill_color_btn, "fill"))
+        fill_color_layout.addWidget(self.fill_color_btn)
+        fill_color_layout.addStretch()
+        layout.addLayout(fill_color_layout)
+
+        # --- EDGE LINE SETTINGS ---
+        layout.addWidget(QLabel("<b>Edge Line Settings:</b>"))
+
+        self.chk_edges = QCheckBox("Show Edge Lines")
+        self.chk_edges.setChecked(True)
+        layout.addWidget(self.chk_edges)
+
+        edge_color_layout = QHBoxLayout()
+        edge_color_layout.addWidget(QLabel("Color:"))
+        self.edge_color_btn = QPushButton()
+        self.edge_color_btn.setStyleSheet("background-color: rgb(0, 0, 0); max-width: 50px;")
+        self.edge_color_btn.clicked.connect(lambda: self.pick_color(self.edge_color_btn, "edge"))
+        edge_color_layout.addWidget(self.edge_color_btn)
+        edge_color_layout.addStretch()
+        layout.addLayout(edge_color_layout)
+
+        edge_width_layout = QHBoxLayout()
+        edge_width_layout.addWidget(QLabel("Width:"))
+        self.edge_width_spin = QDoubleSpinBox()
+        self.edge_width_spin.setRange(0.5, 10.0)
+        self.edge_width_spin.setValue(2.0)
+        self.edge_width_spin.setSingleStep(0.5)
+        edge_width_layout.addWidget(self.edge_width_spin)
+        edge_width_layout.addStretch()
+        layout.addLayout(edge_width_layout)
+
+        # --- HATCH SETTINGS ---
+        layout.addWidget(QLabel("<b>Hatch Settings:</b>"))
+
+        self.chk_hatch = QCheckBox("Enable Hatch")
+        self.chk_hatch.setChecked(True)
+        layout.addWidget(self.chk_hatch)
+
+        spacing_layout = QHBoxLayout()
+        spacing_layout.addWidget(QLabel("Spacing (mm):"))
+        self.spin_spacing = QDoubleSpinBox()
+        self.spin_spacing.setRange(0.5, 20.0)
+        self.spin_spacing.setValue(3.0)
+        self.spin_spacing.setSingleStep(0.5)
+        spacing_layout.addWidget(self.spin_spacing)
+        spacing_layout.addStretch()
+        layout.addLayout(spacing_layout)
+
+        hatch_color_layout = QHBoxLayout()
+        hatch_color_layout.addWidget(QLabel("Color:"))
+        self.hatch_color_btn = QPushButton()
+        self.hatch_color_btn.setStyleSheet("background-color: rgb(77, 77, 77); max-width: 50px;")
+        self.hatch_color_btn.clicked.connect(lambda: self.pick_color(self.hatch_color_btn, "hatch"))
+        hatch_color_layout.addWidget(self.hatch_color_btn)
+        hatch_color_layout.addStretch()
+        layout.addLayout(hatch_color_layout)
+
+        hatch_width_layout = QHBoxLayout()
+        hatch_width_layout.addWidget(QLabel("Width:"))
+        self.hatch_width_spin = QDoubleSpinBox()
+        self.hatch_width_spin.setRange(0.5, 5.0)
+        self.hatch_width_spin.setValue(1.0)
+        self.hatch_width_spin.setSingleStep(0.5)
+        hatch_width_layout.addWidget(self.hatch_width_spin)
+        hatch_width_layout.addStretch()
+        layout.addLayout(hatch_width_layout)
+
+        hatch_point_layout = QHBoxLayout()
+        hatch_point_layout.addWidget(QLabel("Point Size (px):"))
+        self.hatch_point_spin = QSpinBox()
+        self.hatch_point_spin.setRange(0, 10)
+        self.hatch_point_spin.setValue(1)
+        self.hatch_point_spin.setSingleStep(1)
+        hatch_point_layout.addWidget(self.hatch_point_spin)
+        hatch_point_layout.addStretch()
+        layout.addLayout(hatch_point_layout)
+
+        # --- FREEZE BUTTON ---
+        layout.addWidget(QLabel("<b>Freeze Section:</b>"))
+        self.btn_freeze = QPushButton("❄️ Freeze Section (Simple Copy with Folder)")
+        self.btn_freeze.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                font-weight: bold;
+                padding: 8px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        self.btn_freeze.clicked.connect(self.freeze_section)
+        layout.addWidget(self.btn_freeze)
+
+        # --- CONNECTIONS ---
+        # Plane radios: only react to the button that became checked
+        self.radio_xy.toggled.connect(self.on_plane_toggled)
+        self.radio_xz.toggled.connect(self.on_plane_toggled)
+        self.radio_yz.toggled.connect(self.on_plane_toggled)
+
+        self.slider.valueChanged.connect(self.on_slider_changed)
+        self.slider.sliderReleased.connect(self.schedule_update)   # full update after drag
+        self.offset_spin.valueChanged.connect(self.on_spin_changed)
+
+        # Geometry-affecting controls -> debounced geometry update
+        self.chk_mirror_bg.stateChanged.connect(self.schedule_update)
+        self.chk_gpu_clip.stateChanged.connect(self.schedule_update)
+        self.chk_section_fill.stateChanged.connect(self.schedule_update)
+        self.chk_hatch.stateChanged.connect(self.schedule_update)
+        self.spin_spacing.valueChanged.connect(self.schedule_update)
+        self.chk_edges.stateChanged.connect(self.schedule_update)
+
+        # Style-only controls -> cheap style update (no geometry)
+        self.spin_trans.valueChanged.connect(self.update_style)
+        self.edge_width_spin.valueChanged.connect(self.update_style)
+        self.hatch_width_spin.valueChanged.connect(self.update_style)
+        self.hatch_point_spin.valueChanged.connect(self.update_style)
+
+        # --- CLOSE BUTTON ---
+        self.btn_close = QPushButton("Close Analysis")
+        self.btn_close.clicked.connect(self.close)
+        layout.addWidget(self.btn_close)
+
+        layout.addStretch()
+        widget.setLayout(layout)
+        self.setWidget(widget)
+        Gui.getMainWindow().addDockWidget(Qt.LeftDockWidgetArea, self)
+
+    # ------------------------------------------------------------------
+    # UI event handlers (cheap: they never do geometry work directly)
+    # ------------------------------------------------------------------
+    def schedule_update(self, *args):
+        """Many events collapse into one update per timer interval."""
+        if self._closed:
+            return
+        # Throttle (not restart): while the user keeps dragging, updates still
+        # happen every interval instead of only after the movement stops.
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def on_plane_toggled(self, checked):
+        if checked:
+            self.schedule_update()
+
+    def on_slider_changed(self, value):
+        """Slider -> spinbox (signals blocked to avoid the feedback loop)"""
+        mapped_value = (value / 100.0) * self.offset_range
+        self.offset_spin.blockSignals(True)
+        self.offset_spin.setValue(mapped_value)
+        self.offset_spin.blockSignals(False)
+        self.schedule_update()
+
+    def on_spin_changed(self, value):
+        """Spinbox -> slider (signals blocked to avoid the feedback loop)"""
+        slider_value = int((value / self.offset_range) * 100)
+        slider_value = max(-100, min(100, slider_value))
+        self.slider.blockSignals(True)
+        self.slider.setValue(slider_value)
+        self.slider.blockSignals(False)
+        self.schedule_update()
+
+    def _sync_slider(self):
+        value = self.offset_spin.value()
+        slider_value = int((value / self.offset_range) * 100)
+        slider_value = max(-100, min(100, slider_value))
+        self.slider.blockSignals(True)
+        self.slider.setValue(slider_value)
+        self.slider.blockSignals(False)
+
+    # ------------------------------------------------------------------
+    # Gizmo
+    # ------------------------------------------------------------------
+    def create_gizmo(self):
+        try:
+            view = Gui.ActiveDocument.ActiveView
+            size = max(self.x_len, self.y_len, self.z_len) * 0.18
+            self.gizmo = PlaneGizmo(view, size, self._gizmo_start, self._gizmo_drag, self._gizmo_end)
+            self.gizmo.set_visible(self.chk_gizmo.isChecked())
+        except Exception as e:
+            App.Console.PrintWarning(f"Gizmo unavailable: {e}\n")
+            self.gizmo = None
+            self.chk_gizmo.setChecked(False)
+            self.chk_gizmo.setEnabled(False)
+
+    def on_gizmo_toggled(self, *args):
+        if self.gizmo:
+            self.gizmo.set_visible(self.chk_gizmo.isChecked())
+
+    def plane_axes(self, plane_type):
+        """In-plane axis u and half extents (along u and along u x normal)."""
+        if plane_type == "YZ":
+            return App.Vector(0, 1, 0), self.y_len / 2 * 1.1, self.z_len / 2 * 1.1
+        if plane_type == "XZ":
+            return App.Vector(0, 0, 1), self.z_len / 2 * 1.1, self.x_len / 2 * 1.1
+        return App.Vector(1, 0, 0), self.x_len / 2 * 1.1, self.y_len / 2 * 1.1
+
+    def sync_gizmo(self, plane_type, normal, plane_base):
+        if not self.gizmo or self.gizmo.dragging:
+            return
+        u, hu, hw = self.plane_axes(plane_type)
+        self.gizmo.set_pose(plane_base, normal, u)
+        self.gizmo.set_extents(hu, hw)
+
+    def _gizmo_start(self):
+        self._gizmo_dragging = True
+        self._gizmo_start_offset = self.offset_spin.value()
+
+    def _gizmo_drag(self, delta):
+        """Called while dragging; returns the offset change actually applied."""
+        off = self._gizmo_start_offset + delta
+        off = max(-self.offset_range, min(self.offset_range, off))
+        self.offset_spin.blockSignals(True)
+        self.offset_spin.setValue(off)
+        self.offset_spin.blockSignals(False)
+        self._sync_slider()
+        self.schedule_update()
+        return self.offset_spin.value() - self._gizmo_start_offset
+
+    def _gizmo_end(self):
+        self._gizmo_dragging = False
+        self.schedule_update()          # full update (hatch etc.) after the drag
+
+    def pick_color(self, button, target):
+        """Open color picker dialog"""
+        color_dialog = QColorDialog()
+        color_dialog.setCurrentColor(button.palette().button().color())
+
+        run = getattr(color_dialog, "exec_", None) or getattr(color_dialog, "exec")
+        if run():
+            color = color_dialog.currentColor()
+            r, g, b = color.red() / 255.0, color.green() / 255.0, color.blue() / 255.0
+            button.setStyleSheet(
+                f"background-color: rgb({color.red()}, {color.green()}, {color.blue()}); max-width: 50px;"
+            )
+
+            if target == "edge":
+                self.edge_feat.ViewObject.LineColor = (r, g, b)
+            elif target == "hatch":
+                self.hatch_feat.ViewObject.LineColor = (r, g, b)
+            elif target == "fill":
+                self.section_feat.ViewObject.ShapeColor = (r, g, b)
+
+    # ------------------------------------------------------------------
+    # Style-only updates (no geometry work)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _set(vo, prop, value):
+        """Assign a ViewObject property only if it actually changes."""
+        if getattr(vo, prop) != value:
+            setattr(vo, prop, value)
+
+    def update_style(self, *args):
+        if self._closed or not self.bg_feat:
+            return
+        self._set(self.bg_feat.ViewObject, "Transparency", self.spin_trans.value())
+        self._set(self.edge_feat.ViewObject, "LineWidth", self.edge_width_spin.value())
+        self._set(self.hatch_feat.ViewObject, "LineWidth", self.hatch_width_spin.value())
+        self._set(self.hatch_feat.ViewObject, "PointSize", self.hatch_point_spin.value())
+
+    def _vis(self, feat, flag):
+        self._set(feat.ViewObject, "Visibility", bool(flag))
+
+    # ------------------------------------------------------------------
+    # Geometry helpers
+    # ------------------------------------------------------------------
+    def get_plane(self):
+        """Returns (plane_type, normal, plane_base, center_pos)."""
+        offset_val = self.offset_spin.value()
+        c = self.bbox.Center
+        if self.radio_yz.isChecked():
+            center_pos = c.x + offset_val
+            return "YZ", App.Vector(1, 0, 0), App.Vector(center_pos, c.y, c.z), center_pos
+        if self.radio_xz.isChecked():
+            center_pos = c.y + offset_val
+            return "XZ", App.Vector(0, 1, 0), App.Vector(c.x, center_pos, c.z), center_pos
+        center_pos = c.z + offset_val
+        return "XY", App.Vector(0, 0, 1), App.Vector(c.x, c.y, center_pos), center_pos
+
+    def set_clip(self, normal, plane_base, flip=False):
+        """Position the GPU clip plane (cheap). flip=True keeps the other half."""
+        d = normal.dot(plane_base)
+        n = App.Vector(normal)
+        if CLIP_KEEP_NEGATIVE != bool(flip):
+            n = App.Vector(-n.x, -n.y, -n.z)
+            d = -d
+        self.clip.plane.setValue(coin.SbPlane(coin.SbVec3f(n.x, n.y, n.z), d))
+
+    def compute_cut_solid(self, plane_type, normal, plane_base, flip=False):
+        """Exact boolean cut (slow). Used when GPU clipping is off and for freezing.
+
+        flip=True keeps the opposite half. The geometry itself is never moved
+        or reflected, so the object stays where it is while the plane moves.
+        """
+        size = max(self.x_len, self.y_len, self.z_len) * 3
+        cutter = Part.makeBox(size, size, size)
+        # local +Z is the plane normal; the cutter removes the +normal side,
+        # or the -normal side when flipped
+        cutter.translate(App.Vector(-size / 2, -size / 2, -size if flip else 0))
+
+        if plane_type == "YZ":
+            cutter.rotate(App.Vector(0, 0, 0), App.Vector(0, 1, 0), 90)
+        elif plane_type == "XZ":
+            cutter.rotate(App.Vector(0, 0, 0), App.Vector(1, 0, 0), -90)
+
+        cutter.translate(plane_base)
+        return self.base_obj.Shape.cut(cutter)
+
+    def get_slice(self, plane_type, normal, plane_base):
+        """Section wires via Shape.slice (cached)."""
+        d = normal.dot(plane_base)
+        key = (plane_type, round(d, 4))
+        wires = self._slice_cache.get(key)
+        if wires is None:
+            try:
+                wires = self.base_obj.Shape.slice(normal, d)
+            except Exception as e:
+                App.Console.PrintWarning(f"Slice failed: {e}\n")
+                wires = []
+            if len(self._slice_cache) >= SLICE_CACHE_SIZE:
+                self._slice_cache.pop(next(iter(self._slice_cache)))
+            self._slice_cache[key] = wires
+        return wires
+
+    @staticmethod
+    def make_faces(wires):
+        """Build faces (with holes) from the slice wires."""
+        if not wires:
+            return []
+        try:
+            f = Part.makeFace(wires, "Part::FaceMakerBullseye")
+            faces = f.Faces
+            if faces:
+                return faces
+        except Exception:
+            pass
+        faces = []
+        for w in wires:
+            try:
+                if w.isClosed():
+                    faces.append(Part.Face(w))
+            except Exception:
+                pass
+        return faces
+
+    @staticmethod
+    def _pt(plane_type, c, u, v):
+        if plane_type == "YZ":
+            return App.Vector(c, u, v)
+        if plane_type == "XZ":
+            return App.Vector(u, c, v)
+        return App.Vector(u, v, c)
+
+    def build_hatch(self, faces, plane_type, center_pos, spacing):
+        """45-degree hatch for the whole section with a SINGLE boolean."""
+        section = Part.Compound(faces)
+        bb = section.BoundBox
+
+        if plane_type == "YZ":
+            u_min, u_max, v_min, v_max = bb.YMin - 2, bb.YMax + 2, bb.ZMin - 2, bb.ZMax + 2
+        elif plane_type == "XZ":
+            u_min, u_max, v_min, v_max = bb.XMin - 2, bb.XMax + 2, bb.ZMin - 2, bb.ZMax + 2
+        else:
+            u_min, u_max, v_min, v_max = bb.XMin - 2, bb.XMax + 2, bb.YMin - 2, bb.YMax + 2
+
+        height = v_max - v_min
+        total = (u_max - u_min) + height
+        step = spacing * math.sqrt(2)
+
+        if total / step > MAX_HATCH_LINES:
+            step = total / MAX_HATCH_LINES
+            App.Console.PrintWarning(
+                "Hatch spacing too small for this section, spacing increased automatically.\n"
+            )
+
+        lines = []
+        current = u_min
+        while current < u_max + height:
+            p1 = self._pt(plane_type, center_pos, current, v_min)
+            p2 = self._pt(plane_type, center_pos, current - height, v_max)
+            lines.append(Part.makeLine(p1, p2))
+            current += step
+
+        if not lines:
+            return None
+
+        try:
+            result = section.common(Part.Compound(lines))
+            if result.Edges:
+                return result
+        except Exception as e:
+            App.Console.PrintWarning(f"Hatch failed: {e}\n")
+        return None
+
+    # ------------------------------------------------------------------
+    # Main update
+    # ------------------------------------------------------------------
+    def update_section(self):
+        if self._closed or not self.base_obj or not self.bg_feat:
+            return
+        doc = App.ActiveDocument
+        if not doc:
+            return
+
+        self._timer.stop()
+
+        # While dragging the slider we only do the cheap parts
+        quick = self.slider.isSliderDown() or self._gizmo_dragging
+
+        self._vis(self.base_obj, False)
+
+        plane_type, normal, plane_base, center_pos = self.get_plane()
+        flip = self.chk_mirror_bg.isChecked()
+        use_clip = self.clip_ok and self.chk_gpu_clip.isChecked()
+
+        self.sync_gizmo(plane_type, normal, plane_base)
+
+        try:
+            # --- BACKGROUND ---
+            if use_clip:
+                if self._bg_mode != "clip":
+                    self.bg_feat.Shape = self.base_obj.Shape   # tessellated once
+                    # The clipped solid is open, so back faces become visible;
+                    # one-sided lighting avoids their yellowish tint.
+                    self._set(self.bg_feat.ViewObject, "Lighting", "One side")
+                    self._bg_mode = "clip"
+                self.set_clip(normal, plane_base, flip)
+                self.clip.on.setValue(True)
+            else:
+                if self.clip_ok:
+                    self.clip.on.setValue(False)
+                if quick:
+                    # keep the previous solid while dragging in boolean mode
+                    # (only recompute when the slider is released)
+                    pass
+                else:
+                    self.bg_feat.Shape = self.compute_cut_solid(plane_type, normal, plane_base, flip)
+                    self._set(self.bg_feat.ViewObject, "Lighting", "Two side")
+                    self._bg_mode = "solid"
+            self._vis(self.bg_feat, True)
+
+            # --- SECTION (slice) ---
+            wires = self.get_slice(plane_type, normal, plane_base)
+            faces = self.make_faces(wires) if wires else []
+
+            if not wires:
+                self._vis(self.section_feat, False)
+                self._vis(self.edge_feat, False)
+                self._vis(self.hatch_feat, False)
+            else:
+                # Fill
+                if self.chk_section_fill.isChecked() and faces:
+                    self.section_feat.Shape = Part.Compound(faces)
+                    self._vis(self.section_feat, True)
+                else:
+                    self._vis(self.section_feat, False)
+
+                # Edge lines
+                if self.chk_edges.isChecked():
+                    self.edge_feat.Shape = Part.Compound(wires)
+                    self._vis(self.edge_feat, True)
+                else:
+                    self._vis(self.edge_feat, False)
+
+                # Hatch (skipped while dragging)
+                if self.chk_hatch.isChecked() and faces and not quick:
+                    hatch = self.build_hatch(faces, plane_type, center_pos, self.spin_spacing.value())
+                    if hatch is not None:
+                        self.hatch_feat.Shape = hatch
+                        self._vis(self.hatch_feat, True)
+                    else:
+                        self._vis(self.hatch_feat, False)
+                else:
+                    self._vis(self.hatch_feat, False)
+
+            self.update_style()
+
+        except Exception as e:
+            App.Console.PrintError(f"Section Error: {str(e)}\n")
+
+        # Plain Part::Feature objects need no recompute; just clear the "touched" flag.
+        for feat in (self.bg_feat, self.section_feat, self.edge_feat, self.hatch_feat):
+            feat.purgeTouched()
+
+    # ------------------------------------------------------------------
+    # Freeze
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _has_shape(feat):
+        return feat is not None and feat.Shape is not None and not feat.Shape.isNull()
+
+    def freeze_section(self):
+        """Freeze current section view using SimpleCopy with folder"""
+        doc = App.ActiveDocument
+        if not doc or not self.bg_feat:
+            return
+
+        try:
+            # Make sure everything is up to date (including hatch)
+            self._timer.stop()
+            self.update_section()
+
+            plane_type, normal, plane_base, center_pos = self.get_plane()
+            offset_val = self.offset_spin.value()
+
+            group_name = f"Frozen_Section_{plane_type}_Offset_{offset_val:.1f}"
+
+            # Delete old frozen group
+            if self.frozen_group and doc.getObject(self.frozen_group.Name):
+                for obj in list(self.frozen_group.Group):
+                    try:
+                        doc.removeObject(obj.Name)
+                    except Exception:
+                        pass
+                try:
+                    doc.removeObject(self.frozen_group.Name)
+                except Exception:
+                    pass
+
+            self.frozen_group = doc.addObject("App::DocumentObjectGroup", group_name)
+            self.frozen_group.Label = f"Frozen Section ({plane_type}, Offset: {offset_val:.1f} mm)"
+
+            copied_objects = []
+
+            # 1. Background: always a real boolean cut here, because the live
+            #    GPU clip does not change the geometry.
+            bg_shape = self.compute_cut_solid(
+                plane_type, normal, plane_base, self.chk_mirror_bg.isChecked()
+            )
+            if bg_shape is not None and not bg_shape.isNull():
+                bg_copy = doc.addObject("Part::Feature", f"Section_Background_{plane_type}")
+                bg_copy.Shape = bg_shape
+                bg_copy.ViewObject.ShapeColor = self.bg_feat.ViewObject.ShapeColor
+                bg_copy.ViewObject.DisplayMode = "Shaded"
+                bg_copy.ViewObject.Transparency = self.spin_trans.value()
+                copied_objects.append(bg_copy)
+
+            # 2. Section fill
+            if self.section_feat.ViewObject.Visibility and self._has_shape(self.section_feat):
+                fill_copy = doc.addObject("Part::Feature", f"Section_Fill_{plane_type}")
+                fill_copy.Shape = self.section_feat.Shape
+                fill_copy.ViewObject.ShapeColor = self.section_feat.ViewObject.ShapeColor
+                fill_copy.ViewObject.LineColor = self.section_feat.ViewObject.LineColor
+                fill_copy.ViewObject.LineWidth = self.section_feat.ViewObject.LineWidth
+                fill_copy.ViewObject.DisplayMode = "Shaded"
+                fill_copy.ViewObject.Transparency = 0
+                copied_objects.append(fill_copy)
+
+            # 3. Edge lines
+            if self.edge_feat.ViewObject.Visibility and self._has_shape(self.edge_feat):
+                edge_copy = doc.addObject("Part::Feature", f"Section_Edges_{plane_type}")
+                edge_copy.Shape = self.edge_feat.Shape
+                edge_copy.ViewObject.LineColor = self.edge_feat.ViewObject.LineColor
+                edge_copy.ViewObject.LineWidth = self.edge_feat.ViewObject.LineWidth
+                edge_copy.ViewObject.DisplayMode = "Wireframe"
+                edge_copy.ViewObject.PointSize = 1
+                copied_objects.append(edge_copy)
+
+            # 4. Hatch lines
+            if self.hatch_feat.ViewObject.Visibility and self._has_shape(self.hatch_feat):
+                hatch_copy = doc.addObject("Part::Feature", f"Section_Hatch_{plane_type}")
+                hatch_copy.Shape = self.hatch_feat.Shape
+                hatch_copy.ViewObject.LineColor = self.hatch_feat.ViewObject.LineColor
+                hatch_copy.ViewObject.LineWidth = self.hatch_feat.ViewObject.LineWidth
+                hatch_copy.ViewObject.DisplayMode = "Wireframe"
+                hatch_copy.ViewObject.PointSize = self.hatch_point_spin.value()
+                copied_objects.append(hatch_copy)
+
+            if not copied_objects:
+                QMessageBox.warning(None, "Warning", "No section elements found to copy!")
+                try:
+                    doc.removeObject(self.frozen_group.Name)
+                except Exception:
+                    pass
+                self.frozen_group = None
+                return
+
+            for obj in copied_objects:
+                self.frozen_group.addObject(obj)
+
+            self.frozen_group.ViewObject.Visibility = True
+
+            Gui.Selection.clearSelection()
+            Gui.Selection.addSelection(self.frozen_group)
+
+            for obj in copied_objects:
+                obj.purgeTouched()
+            self.frozen_group.purgeTouched()
+
+            QMessageBox.information(
+                None,
+                "Success",
+                f"Section successfully frozen!\n"
+                f"Group name: {self.frozen_group.Label}\n"
+                f"Element count: {len(copied_objects)}\n"
+                f"Plane: {plane_type}, Offset: {offset_val:.1f} mm\n\n"
+                f"📁 Contents:\n" +
+                "\n".join([f"  • {obj.Label}" for obj in copied_objects])
+            )
+
+        except Exception as e:
+            App.Console.PrintError(f"Freeze Error: {str(e)}\n")
+            QMessageBox.critical(None, "Error", f"Error while freezing section:\n{str(e)}")
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
+    def closeEvent(self, event):
+        """Cleanup on close"""
+        if self._closed:
+            super().closeEvent(event)
+            return
+        self._closed = True
+
+        try:
+            self._timer.stop()
+        except Exception:
+            pass
+
+        if self.gizmo is not None:
+            self.gizmo.remove()
+            self.gizmo = None
+
+        # Remove clip plane from the scene graph before deleting its owner
+        if self.clip is not None and self.clip_parent is not None:
+            try:
+                self.clip_parent.removeChild(self.clip)
+            except Exception:
+                pass
+            self.clip = None
+            self.clip_parent = None
+
+        if self.base_obj:
+            try:
+                self.base_obj.ViewObject.Visibility = True
+            except Exception:
+                pass
+
+        doc = App.ActiveDocument
+        if doc:
+            # Delete all live features (frozen group is kept)
+            for feat in [self.section_feat, self.edge_feat, self.hatch_feat, self.bg_feat]:
+                if feat is not None:
+                    try:
+                        if doc.getObject(feat.Name):
+                            doc.removeObject(feat.Name)
+                    except Exception:
+                        pass
+
+        self._slice_cache.clear()
+        super().closeEvent(event)
+
+        # Fully remove the dock so repeated runs don't leave hidden docks behind
+        try:
+            Gui.getMainWindow().removeDockWidget(self)
+            self.deleteLater()
+        except Exception:
+            pass
+
+
+# Run the macro
+try:
+    section_analyzer.close()
+except Exception:
+    pass
+
+section_analyzer = LiveSectionAnalyzer()
