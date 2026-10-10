@@ -2026,8 +2026,12 @@ class LiveSectionAnalyzer(QDockWidget):
             return App.Vector(u, c, v)
         return App.Vector(u, v, c)
 
-    def build_hatch(self, faces, plane_type, center_pos, spacing):
-        """45-degree hatch for the whole section with a SINGLE boolean."""
+    def build_hatch(self, faces, plane_type, center_pos, spacing, angle=None):
+        """Hatch for the whole section with a SINGLE boolean.
+
+        angle=None: the classic 45-degree pattern. With an angle (degrees) the lines are
+        anchored at the origin, exactly like the mesh section draws them.
+        """
         section = Part.Compound(faces)
         bb = section.BoundBox
 
@@ -2037,6 +2041,10 @@ class LiveSectionAnalyzer(QDockWidget):
             u_min, u_max, v_min, v_max = bb.XMin - 2, bb.XMax + 2, bb.ZMin - 2, bb.ZMax + 2
         else:
             u_min, u_max, v_min, v_max = bb.XMin - 2, bb.XMax + 2, bb.YMin - 2, bb.YMax + 2
+
+        if angle is not None:
+            return self._build_hatch_angled(section, plane_type, center_pos, spacing, angle,
+                                            u_min, u_max, v_min, v_max)
 
         height = v_max - v_min
         total = (u_max - u_min) + height
@@ -2066,6 +2074,56 @@ class LiveSectionAnalyzer(QDockWidget):
         except Exception as e:
             App.Console.PrintWarning(f"Hatch failed: {e}\n")
         return None
+
+    def _build_hatch_angled(self, section, plane_type, center_pos, spacing, angle,
+                            u_min, u_max, v_min, v_max):
+        """Hatch lines n.q = j * spacing at `angle` degrees, clipped to the section."""
+        a = math.radians(angle)
+        nu, nv = math.cos(a), math.sin(a)             # line normal
+        wu, wv = -nv, nu                              # line direction
+        s_vals = [u * nu + v * nv for u in (u_min, u_max) for v in (v_min, v_max)]
+        s_lo, s_hi = min(s_vals), max(s_vals)
+        if (s_hi - s_lo) / spacing > MAX_HATCH_LINES:
+            spacing = (s_hi - s_lo) / MAX_HATCH_LINES
+            App.Console.PrintWarning(
+                "Hatch spacing too small for this section, spacing increased automatically.\n"
+            )
+        half = math.hypot(u_max - u_min, v_max - v_min) / 2 + 1.0
+        t0 = (u_min + u_max) / 2 * wu + (v_min + v_max) / 2 * wv   # centre along the lines
+        lines = []
+        j = math.ceil(s_lo / spacing)
+        while j * spacing <= s_hi:
+            s = j * spacing
+            bu, bv = s * nu + t0 * wu, s * nv + t0 * wv
+            lines.append(Part.makeLine(
+                self._pt(plane_type, center_pos, bu - half * wu, bv - half * wv),
+                self._pt(plane_type, center_pos, bu + half * wu, bv + half * wv)))
+            j += 1
+        if not lines:
+            return None
+        try:
+            result = section.common(Part.Compound(lines))
+            if result.Edges:
+                return result
+        except Exception as e:
+            App.Console.PrintWarning(f"Hatch failed: {e}\n")
+        return None
+
+    def _per_object_hatch(self, plane_type, normal, plane_base, center_pos):
+        """Exact hatch with each object's own angle / spacing, as the mesh section shows it."""
+        spacing = self.spin_spacing.value()
+        parts = []
+        for t in self.targets:
+            if not t.checked:
+                continue
+            faces = self.make_faces(self.get_slice(t, plane_type, normal, plane_base))
+            if not faces:
+                continue
+            angle, scale = self._hatch_style(t)
+            h = self.build_hatch(faces, plane_type, center_pos, spacing * scale, angle)
+            if h is not None:
+                parts.append(h)
+        return Part.Compound(parts) if parts else None
 
     # ------------------------------------------------------------------
     # Main update
@@ -2323,10 +2381,15 @@ class LiveSectionAnalyzer(QDockWidget):
                 edge_copy.ViewObject.PointSize = 1
                 copied_objects.append(edge_copy)
 
-            # 4. Hatch lines
+            # 4. Hatch lines (with the mesh section on: each object's own angle, as shown live)
             if self.hatch_feat.ViewObject.Visibility and self._has_shape(self.hatch_feat):
+                hatch_shape = None
+                if self._mesh_active():
+                    hatch_shape = self._per_object_hatch(plane_type, normal, plane_base, center_pos)
+                if hatch_shape is None:
+                    hatch_shape = self.hatch_feat.Shape
                 hatch_copy = doc.addObject("Part::Feature", f"Section_Hatch_{plane_type}")
-                hatch_copy.Shape = self.hatch_feat.Shape
+                hatch_copy.Shape = hatch_shape
                 hatch_copy.Placement = self.hatch_feat.Placement
                 hatch_copy.ViewObject.LineColor = self.hatch_feat.ViewObject.LineColor
                 hatch_copy.ViewObject.LineWidth = self.hatch_feat.ViewObject.LineWidth
