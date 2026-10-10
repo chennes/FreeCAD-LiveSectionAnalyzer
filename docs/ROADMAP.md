@@ -40,7 +40,7 @@ for comparison (untick the checkbox) and is always used by *Freeze*.
    ends meet within 1e-4 of the object's diagonal are joined (cracks).
 2. ✅ Hatch: scanline clipping of the lines against the loops (even-odd rule, holes for free), numpy only.
    Lines are anchored at the origin, so the pattern does not swim while the plane moves.
-   `MESH_HATCH_STYLES` gives each object its own angle and spacing factor.
+   `HATCH_STYLES` (shared with the exact section) gives each object its own angle and spacing factor.
 3. ✅ Fill: nesting depth of the loops (outer / hole / island), holes joined to the outer loop by keyhole
    bridging, drawn as concave Coin polygons (`SoShapeHints` unknown face type).
 4. ✅ Exact geometry only for *Freeze*. `MESH_TOL_REL` (coarse, while dragging) and `MESH_TOL_FINE_REL`

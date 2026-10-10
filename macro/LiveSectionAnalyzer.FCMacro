@@ -93,9 +93,10 @@ MESH_TOL_FINE_REL = 1e-4
 # assembly stutters.
 MESH_DRAG_HATCH = True
 
-# Hatch style per sectioned object: (angle in degrees, spacing factor). Neighbouring
-# parts get different entries, so touching sections can be told apart.
-MESH_HATCH_STYLES = ((45.0, 1.0), (135.0, 1.0), (0.0, 1.5), (90.0, 1.5))
+# Hatch style per sectioned object (exact and mesh section alike): (angle in degrees,
+# spacing factor). Neighbouring parts get different entries, so touching sections can be
+# told apart. One entry, e.g. ((45.0, 1.0),), hatches everything the same way.
+HATCH_STYLES = ((45.0, 1.0), (135.0, 1.0), (0.0, 1.5), (90.0, 1.5))
 
 # Max cached mesh sections (all objects together).
 MESH_CACHE_SIZE = 128
@@ -839,7 +840,7 @@ class LiveSectionAnalyzer(QDockWidget):
         self._gizmo_start_offset = 0.0
         self._slice_cache = {}
         self._loop_cache = {}         # mesh section loops per (object, mesh level, plane)
-        self._hatch_idx = {}          # object key -> index into MESH_HATCH_STYLES
+        self._hatch_idx = {}          # object key -> index into HATCH_STYLES
         self.init_done = False
 
         if not self._collect_targets():
@@ -1841,7 +1842,7 @@ class LiveSectionAnalyzer(QDockWidget):
         if idx is None:
             idx = len(self._hatch_idx)
             self._hatch_idx[t.key] = idx
-        return MESH_HATCH_STYLES[idx % len(MESH_HATCH_STYLES)]
+        return HATCH_STYLES[idx % len(HATCH_STYLES)]
 
     @staticmethod
     def _fill_node(coords, shape_set, arrays):
@@ -2026,11 +2027,11 @@ class LiveSectionAnalyzer(QDockWidget):
             return App.Vector(u, c, v)
         return App.Vector(u, v, c)
 
-    def build_hatch(self, faces, plane_type, center_pos, spacing, angle=None):
-        """Hatch for the whole section with a SINGLE boolean.
+    def build_hatch(self, faces, plane_type, center_pos, spacing, angle=45.0):
+        """Hatch of one set of section faces with a SINGLE boolean.
 
-        angle=None: the classic 45-degree pattern. With an angle (degrees) the lines are
-        anchored at the origin, exactly like the mesh section draws them.
+        The lines run at `angle` degrees (in-plane axes as in _pt) and sit at multiples of
+        `spacing` from the origin, exactly like the mesh section draws them.
         """
         section = Part.Compound(faces)
         bb = section.BoundBox
@@ -2042,42 +2043,6 @@ class LiveSectionAnalyzer(QDockWidget):
         else:
             u_min, u_max, v_min, v_max = bb.XMin - 2, bb.XMax + 2, bb.YMin - 2, bb.YMax + 2
 
-        if angle is not None:
-            return self._build_hatch_angled(section, plane_type, center_pos, spacing, angle,
-                                            u_min, u_max, v_min, v_max)
-
-        height = v_max - v_min
-        total = (u_max - u_min) + height
-        step = spacing * math.sqrt(2)
-
-        if total / step > MAX_HATCH_LINES:
-            step = total / MAX_HATCH_LINES
-            App.Console.PrintWarning(
-                "Hatch spacing too small for this section, spacing increased automatically.\n"
-            )
-
-        lines = []
-        current = u_min
-        while current < u_max + height:
-            p1 = self._pt(plane_type, center_pos, current, v_min)
-            p2 = self._pt(plane_type, center_pos, current - height, v_max)
-            lines.append(Part.makeLine(p1, p2))
-            current += step
-
-        if not lines:
-            return None
-
-        try:
-            result = section.common(Part.Compound(lines))
-            if result.Edges:
-                return result
-        except Exception as e:
-            App.Console.PrintWarning(f"Hatch failed: {e}\n")
-        return None
-
-    def _build_hatch_angled(self, section, plane_type, center_pos, spacing, angle,
-                            u_min, u_max, v_min, v_max):
-        """Hatch lines n.q = j * spacing at `angle` degrees, clipped to the section."""
         a = math.radians(angle)
         nu, nv = math.cos(a), math.sin(a)             # line normal
         wu, wv = -nv, nu                              # line direction
@@ -2090,6 +2055,7 @@ class LiveSectionAnalyzer(QDockWidget):
             )
         half = math.hypot(u_max - u_min, v_max - v_min) / 2 + 1.0
         t0 = (u_min + u_max) / 2 * wu + (v_min + v_max) / 2 * wv   # centre along the lines
+
         lines = []
         j = math.ceil(s_lo / spacing)
         while j * spacing <= s_hi:
@@ -2099,8 +2065,10 @@ class LiveSectionAnalyzer(QDockWidget):
                 self._pt(plane_type, center_pos, bu - half * wu, bv - half * wv),
                 self._pt(plane_type, center_pos, bu + half * wu, bv + half * wv)))
             j += 1
+
         if not lines:
             return None
+
         try:
             result = section.common(Part.Compound(lines))
             if result.Edges:
@@ -2109,16 +2077,10 @@ class LiveSectionAnalyzer(QDockWidget):
             App.Console.PrintWarning(f"Hatch failed: {e}\n")
         return None
 
-    def _per_object_hatch(self, plane_type, normal, plane_base, center_pos):
-        """Exact hatch with each object's own angle / spacing, as the mesh section shows it."""
-        spacing = self.spin_spacing.value()
+    def build_hatch_per_object(self, per_obj, plane_type, center_pos, spacing):
+        """Hatch of all sectioned objects, each with its own angle / spacing (HATCH_STYLES)."""
         parts = []
-        for t in self.targets:
-            if not t.checked:
-                continue
-            faces = self.make_faces(self.get_slice(t, plane_type, normal, plane_base))
-            if not faces:
-                continue
+        for t, faces in per_obj:
             angle, scale = self._hatch_style(t)
             h = self.build_hatch(faces, plane_type, center_pos, spacing * scale, angle)
             if h is not None:
@@ -2204,6 +2166,7 @@ class LiveSectionAnalyzer(QDockWidget):
                 self._mesh_hide()
                 # --- SECTION (slice) of every checked object ---
                 wires, faces, face_colors = [], [], []
+                per_obj = []                                   # (target, faces) for the hatch
                 preview_segs = []
                 for t in active:
                     t0 = time.perf_counter()
@@ -2226,6 +2189,8 @@ class LiveSectionAnalyzer(QDockWidget):
                     tm["faces"] += time.perf_counter() - t0
                     wires += w
                     faces += f
+                    if f:
+                        per_obj.append((t, f))
                     shade = tuple(c * 0.75 for c in t.color[:3])
                     face_colors += [shade + (1.0,)] * len(f)
 
@@ -2266,7 +2231,8 @@ class LiveSectionAnalyzer(QDockWidget):
                     # Hatch (skipped while dragging)
                     t0 = time.perf_counter()
                     if self.chk_hatch.isChecked() and faces and not quick:
-                        hatch = self.build_hatch(faces, plane_type, center_pos, self.spin_spacing.value())
+                        hatch = self.build_hatch_per_object(
+                            per_obj, plane_type, center_pos, self.spin_spacing.value())
                         if hatch is not None:
                             self.hatch_feat.Shape = hatch
                             self.hatch_feat.Placement = pose
@@ -2381,15 +2347,10 @@ class LiveSectionAnalyzer(QDockWidget):
                 edge_copy.ViewObject.PointSize = 1
                 copied_objects.append(edge_copy)
 
-            # 4. Hatch lines (with the mesh section on: each object's own angle, as shown live)
+            # 4. Hatch lines
             if self.hatch_feat.ViewObject.Visibility and self._has_shape(self.hatch_feat):
-                hatch_shape = None
-                if self._mesh_active():
-                    hatch_shape = self._per_object_hatch(plane_type, normal, plane_base, center_pos)
-                if hatch_shape is None:
-                    hatch_shape = self.hatch_feat.Shape
                 hatch_copy = doc.addObject("Part::Feature", f"Section_Hatch_{plane_type}")
-                hatch_copy.Shape = hatch_shape
+                hatch_copy.Shape = self.hatch_feat.Shape
                 hatch_copy.Placement = self.hatch_feat.Placement
                 hatch_copy.ViewObject.LineColor = self.hatch_feat.ViewObject.LineColor
                 hatch_copy.ViewObject.LineWidth = self.hatch_feat.ViewObject.LineWidth

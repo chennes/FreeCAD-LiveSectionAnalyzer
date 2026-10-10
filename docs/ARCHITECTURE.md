@@ -19,7 +19,7 @@ The panel lists every visible solid of the document as a `_Target` (object + sha
 1. A 60 ms throttle timer (not restarted on every event) calls `update_section()`.
 2. **Clip**: GPU mode moves the scene-wide `SoClipPlane` (`set_clip`). Backgrounds of checked objects are copies; without GPU clipping they are boolean cuts (`compute_cut_solid`).
 3. **Section**: `get_slice()` uses `Shape.slice` per checked object (cached, `SLICE_CACHE_SIZE`), `make_faces()` builds faces (`Part::FaceMakerBullseye`) per object; fill colors follow the object colors.
-4. **Hatch**: `build_hatch()` creates one boolean over all hatch lines of all checked objects, limited by `MAX_HATCH_LINES`.
+4. **Hatch**: `build_hatch_per_object()` runs `build_hatch()` (one boolean) for each checked object with its own angle and spacing factor from `HATCH_STYLES`, limited by `MAX_HATCH_LINES` per object.
 5. While dragging, a quick mode skips hatch and boolean work; the full result is built on release.
 6. Features are marked with `purgeTouched()` instead of a full recompute; view properties are written only when changed.
 
@@ -44,4 +44,4 @@ Mirror flips which side of the plane is kept (`flip` in `set_clip` / `compute_cu
 
 ## Tunables
 
-`PANEL_MODE`, `CLIP_KEEP_NEGATIVE`, `GIZMO_PICK_PLANE`, `AUTO_SECTION_MAX_OBJECTS`, `MAX_HATCH_LINES`, `SLICE_CACHE_SIZE`, `OVERLAY_OFFSET_REL`, `DEBUG_TIMING`, `FAST_PREVIEW_MS`, `MESH_SECTION`, `MESH_TOL_REL`, `MESH_TOL_FINE_REL`, `MESH_DRAG_HATCH`, `MESH_HATCH_STYLES`, `MESH_CACHE_SIZE` at the top of the file.
+`PANEL_MODE`, `CLIP_KEEP_NEGATIVE`, `GIZMO_PICK_PLANE`, `AUTO_SECTION_MAX_OBJECTS`, `MAX_HATCH_LINES`, `SLICE_CACHE_SIZE`, `OVERLAY_OFFSET_REL`, `DEBUG_TIMING`, `FAST_PREVIEW_MS`, `MESH_SECTION`, `MESH_TOL_REL`, `MESH_TOL_FINE_REL`, `MESH_DRAG_HATCH`, `HATCH_STYLES`, `MESH_CACHE_SIZE` at the top of the file.
