@@ -1377,8 +1377,12 @@ class LiveSectionAnalyzer(QDockWidget):
             return
         arr = np.concatenate(pts).reshape(-1, 3)
         k = len(arr) // 2
+        # setValues() does not shrink the fields: cut them to the new size, otherwise
+        # the segments of earlier plane positions stay on screen
         self.preview_coords.point.setValues(0, len(arr), arr.tolist())
+        self.preview_coords.point.setNum(len(arr))
         self.preview_lines.numVertices.setValues(0, k, [2] * k)
+        self.preview_lines.numVertices.setNum(k)
         self.preview_switch.whichChild.setValue(coin.SO_SWITCH_ALL)
 
     def get_slice(self, t, plane_type, normal, plane_base):
