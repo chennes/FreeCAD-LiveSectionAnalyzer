@@ -44,6 +44,10 @@ CLIP_KEEP_NEGATIVE = True
 # Safety limit for the number of hatch lines generated per update.
 MAX_HATCH_LINES = 1500
 
+# Let the gizmo be grabbed on the plane itself (surface and outline), not only
+# on the arrow. Set to False if you need to click objects behind the plane.
+GIZMO_PICK_PLANE = True
+
 # Max cached slices.
 SLICE_CACHE_SIZE = 64
 
@@ -70,7 +74,7 @@ class PlaneGizmo:
     mouse events before FreeCAD's navigation/selection code, so a drag on the
     arrow neither rotates the view nor changes the selection.
     """
-    PICK_PIXELS = 16
+    PICK_PIXELS = 22
     COLOR = (1.0, 0.55, 0.0)
     COLOR_HOT = (1.0, 0.9, 0.2)
 
@@ -85,6 +89,10 @@ class PlaneGizmo:
 
         self.origin = App.Vector(0, 0, 0)
         self.normal = App.Vector(0, 1, 0)
+        self.u_axis = App.Vector(1, 0, 0)
+        self.w_axis = App.Vector(0, 0, 1)
+        self.half_u = size
+        self.half_w = size
         self.dragging = False
         self.hot = False
         self._anchor = None
@@ -185,6 +193,7 @@ class PlaneGizmo:
             arrow.addChild(sep)
 
     def set_extents(self, half_u, half_w):
+        self.half_u, self.half_w = half_u, half_w
         pts = [(-half_u, 0, -half_w), (half_u, 0, -half_w),
                (half_u, 0, half_w), (-half_u, 0, half_w)]
         self.coords.point.setValues(0, 4, pts)
@@ -195,6 +204,7 @@ class PlaneGizmo:
         n = App.Vector(normal)
         u = App.Vector(u_axis)
         w = u.cross(n)
+        self.u_axis, self.w_axis = u, w
         m = App.Matrix()
         m.A11, m.A21, m.A31 = u.x, u.y, u.z
         m.A12, m.A22, m.A32 = n.x, n.y, n.z
@@ -223,6 +233,29 @@ class PlaneGizmo:
         return coin.SbVec2f(x / max(self.widget.width(), 1),
                             1.0 - y / max(self.widget.height(), 1))
 
+    @staticmethod
+    def _dist_to_segment(x, y, a, b):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        seg2 = dx * dx + dy * dy
+        t = 0.0 if seg2 < 1e-6 else max(0.0, min(1.0, ((x - a[0]) * dx + (y - a[1]) * dy) / seg2))
+        return math.hypot(x - (a[0] + t * dx), y - (a[1] + t * dy))
+
+    @staticmethod
+    def _inside_polygon(x, y, pts):
+        """Point in convex polygon (screen space)."""
+        sign = 0
+        for i in range(len(pts)):
+            a, b = pts[i], pts[(i + 1) % len(pts)]
+            cross = (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0])
+            if abs(cross) < 1e-9:
+                continue
+            s_ = 1 if cross > 0 else -1
+            if sign == 0:
+                sign = s_
+            elif s_ != sign:
+                return False
+        return True
+
     def hit_test(self, x, y):
         vv = self._volume()
         w, h = self.widget.width(), self.widget.height()
@@ -231,15 +264,26 @@ class PlaneGizmo:
             s = vv.projectToScreen(coin.SbVec3f(p.x, p.y, p.z)).getValue()
             return s[0] * w, (1.0 - s[1]) * h
 
-        ax, ay = to_px(self.origin - self.normal * self.reach)
-        bx, by = to_px(self.origin + self.normal * self.reach)
-        dx, dy = bx - ax, by - ay
-        seg2 = dx * dx + dy * dy
-        if seg2 < 1e-6:
-            t = 0.0
-        else:
-            t = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / seg2))
-        return math.hypot(x - (ax + t * dx), y - (ay + t * dy)) <= self.PICK_PIXELS
+        # arrow
+        a = to_px(self.origin - self.normal * self.reach)
+        b = to_px(self.origin + self.normal * self.reach)
+        if self._dist_to_segment(x, y, a, b) <= self.PICK_PIXELS:
+            return True
+
+        if not GIZMO_PICK_PLANE:
+            return False
+
+        # plane: outline band and surface
+        u = self.u_axis * self.half_u
+        v = self.w_axis * self.half_w
+        o = self.origin
+        corners = [to_px(o - u - v), to_px(o + u - v), to_px(o + u + v), to_px(o - u + v)]
+        if self._inside_polygon(x, y, corners):
+            return True
+        return any(
+            self._dist_to_segment(x, y, corners[i], corners[(i + 1) % 4]) <= self.PICK_PIXELS * 0.6
+            for i in range(4)
+        )
 
     def _axis_param(self, x, y, anchor):
         """t of the axis point (anchor + t*normal) closest to the mouse ray."""
