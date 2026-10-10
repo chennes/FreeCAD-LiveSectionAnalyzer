@@ -2,6 +2,7 @@
 
 ## 0.4.0
 - Options now open in FreeCAD's Tasks panel with a standard Close button (falls back to a window if another task dialog is open; `PANEL_MODE` at the top of the macro).
+- Gizmo: bigger arrow pick area and the plane itself (surface and outline) can be dragged; `GIZMO_PICK_PLANE` turns the plane grab off.
 - Panel is scrollable, shows a "more options below" hint, and has collapsible sections; Freeze Section stays visible at the bottom.
 
 ## 0.3.0
