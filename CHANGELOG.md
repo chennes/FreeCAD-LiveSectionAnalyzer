@@ -4,6 +4,8 @@
 
 - `DEBUG_TIMING`: per-update timings (background / slice / faces / fill / edges / hatch) in the Report view.
 - Objects the plane does not touch are skipped by a bounding-box test before slicing (~3x faster on a 60-solid demo).
+- Fast drag preview: slow objects are outlined from their tessellation (numpy) while the plane moves; the exact section follows when you let go. `FAST_PREVIEW_MS` sets the threshold. Needs numpy (bundled with FreeCAD); falls back to exact slicing without it.
+- Adaptive update delay: the wait before the next update grows with the duration of the last one (60-250 ms).
 
 ## 0.4.0 – 2026-10-10
 - The macro no longer needs a selection: with nothing selected it clips everything visible (scenes of up to 12 solids are sectioned completely, bigger ones start with nothing checked; `AUTO_SECTION_MAX_OBJECTS`).
