@@ -4,7 +4,7 @@ Interactive, real-time section analysis for FreeCAD.
 Select a solid, run the macro, and move the section plane with a slider,
 a spin box or by dragging a gizmo directly in the 3D view.
 
-Version: 0.4
+Version: 0.5-experimental
 Author: Sedat Kuran
 License: MIT (see LICENSE)
 Repository: https://github.com/sedatkrn/FreeCAD-LiveSectionAnalyzer
@@ -15,6 +15,7 @@ import FreeCAD as App
 import FreeCADGui as Gui
 import Part
 import math
+import time
 
 from PySide.QtWidgets import (
     QColorDialog, QDockWidget, QDoubleSpinBox, QMessageBox, QLabel, QCheckBox,
@@ -49,6 +50,10 @@ MAX_HATCH_LINES = 1500
 # Let the gizmo be grabbed on the plane itself (surface and outline), not only
 # on the arrow. Set to False if you need to click objects behind the plane.
 GIZMO_PICK_PLANE = True
+
+# v0.5 (experimental): print per-update timings (slice / faces / fill / edges /
+# hatch / total, objects skipped by the bounding-box test) to the Report view.
+DEBUG_TIMING = True
 
 # Max cached slices (all objects together).
 SLICE_CACHE_SIZE = 256
@@ -458,6 +463,7 @@ class _Target:
         self.key = (obj.Document.Name, obj.Name)
         self.label = obj.Label
         self.color = LiveSectionAnalyzer._display_color(obj)
+        self.bbox = shape.BoundBox
         self.bg_feat = None
         self.bg_mode = None
         self.was_visible = True
@@ -498,6 +504,7 @@ class LiveSectionAnalyzer(QDockWidget):
         self.y_len = scene.YMax - scene.YMin
         self.z_len = scene.ZMax - scene.ZMin
 
+        self._skipped = 0
         # Debounce timer: many UI events -> a single update
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -1271,9 +1278,20 @@ class LiveSectionAnalyzer(QDockWidget):
         cutter.translate(plane_base)
         return shape.cut(cutter)
 
+    @staticmethod
+    def _plane_hits_bbox(bb, n, d):
+        """False when the plane n.x = d cannot touch the bounding box (cheap test)."""
+        c = bb.Center
+        r = (bb.XLength * abs(n.x) + bb.YLength * abs(n.y) + bb.ZLength * abs(n.z)) * 0.5
+        tol = max(bb.DiagonalLength, 1.0) * 1e-6
+        return abs(n.x * c.x + n.y * c.y + n.z * c.z - d) <= r + tol
+
     def get_slice(self, t, plane_type, normal, plane_base):
         """Section wires of one object via Shape.slice (cached)."""
         d = normal.dot(plane_base)
+        if not self._plane_hits_bbox(t.bbox, normal, d):
+            self._skipped += 1
+            return []
         key = (t.key, plane_type, round(d, 4))
         wires = self._slice_cache.get(key)
         if wires is None:
@@ -1377,6 +1395,9 @@ class LiveSectionAnalyzer(QDockWidget):
             return
 
         self._timer.stop()
+        t_start = time.perf_counter()
+        tm = {"slice": 0.0, "faces": 0.0, "fill": 0.0, "edges": 0.0, "hatch": 0.0, "bg": 0.0}
+        self._skipped = 0
 
         # While dragging the slider we only do the cheap parts
         quick = self.slider.isSliderDown() or self._gizmo_dragging
@@ -1400,6 +1421,7 @@ class LiveSectionAnalyzer(QDockWidget):
                 self.clip.on.setValue(False)
 
             # --- BACKGROUND copies of the sectioned objects ---
+            t0 = time.perf_counter()
             for t in active:
                 self._vis(t.obj, False)
                 if use_clip:
@@ -1416,13 +1438,19 @@ class LiveSectionAnalyzer(QDockWidget):
                     t.bg_mode = "solid"
                 self._vis(t.bg_feat, True)
 
+            tm["bg"] = time.perf_counter() - t0
+
             # --- SECTION (slice) of every checked object ---
             wires, faces, face_colors = [], [], []
             for t in active:
+                t0 = time.perf_counter()
                 w = self.get_slice(t, plane_type, normal, plane_base)
+                tm["slice"] += time.perf_counter() - t0
                 if not w:
                     continue
+                t0 = time.perf_counter()
                 f = self.make_faces(w)
+                tm["faces"] += time.perf_counter() - t0
                 wires += w
                 faces += f
                 shade = tuple(c * 0.75 for c in t.color[:3])
@@ -1434,6 +1462,7 @@ class LiveSectionAnalyzer(QDockWidget):
                 self._vis(self.hatch_feat, False)
             else:
                 # Fill
+                t0 = time.perf_counter()
                 if self.chk_section_fill.isChecked() and faces:
                     self.section_feat.Shape = Part.Compound(faces)
                     self.section_feat.Placement = pose
@@ -1446,7 +1475,10 @@ class LiveSectionAnalyzer(QDockWidget):
                 else:
                     self._vis(self.section_feat, False)
 
+                tm["fill"] = time.perf_counter() - t0
+
                 # Edge lines
+                t0 = time.perf_counter()
                 if self.chk_edges.isChecked():
                     self.edge_feat.Shape = Part.Compound(wires)
                     self.edge_feat.Placement = pose
@@ -1454,7 +1486,10 @@ class LiveSectionAnalyzer(QDockWidget):
                 else:
                     self._vis(self.edge_feat, False)
 
+                tm["edges"] = time.perf_counter() - t0
+
                 # Hatch (skipped while dragging)
+                t0 = time.perf_counter()
                 if self.chk_hatch.isChecked() and faces and not quick:
                     hatch = self.build_hatch(faces, plane_type, center_pos, self.spin_spacing.value())
                     if hatch is not None:
@@ -1465,6 +1500,7 @@ class LiveSectionAnalyzer(QDockWidget):
                         self._vis(self.hatch_feat, False)
                 else:
                     self._vis(self.hatch_feat, False)
+                tm["hatch"] = time.perf_counter() - t0
 
             self.update_style()
 
@@ -1475,6 +1511,15 @@ class LiveSectionAnalyzer(QDockWidget):
         for feat in [self.section_feat, self.edge_feat, self.hatch_feat] + [t.bg_feat for t in active]:
             if feat is not None:
                 feat.purgeTouched()
+
+        if DEBUG_TIMING:
+            total = time.perf_counter() - t_start
+            App.Console.PrintMessage(
+                "[LSA] %s %d obj (%d skipped by bbox) | bg %.0f  slice %.0f  faces %.0f  "
+                "fill %.0f  edges %.0f  hatch %.0f | total %.0f ms\n" % (
+                    "drag" if quick else "full", len(active), self._skipped,
+                    tm["bg"] * 1e3, tm["slice"] * 1e3, tm["faces"] * 1e3,
+                    tm["fill"] * 1e3, tm["edges"] * 1e3, tm["hatch"] * 1e3, total * 1e3))
 
     # ------------------------------------------------------------------
     # Freeze
