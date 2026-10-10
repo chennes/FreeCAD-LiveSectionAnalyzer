@@ -741,6 +741,27 @@ class LiveSectionAnalyzer(QDockWidget):
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(0, 0, 0, 0)
         panel_layout.addWidget(scroll, 1)
+
+        # Hint shown while more options are hidden below the visible area
+        bar = scroll.verticalScrollBar()
+        self.more_hint = QPushButton("\u25BC  more options below  \u25BC")
+        self.more_hint.setFlat(True)
+        self.more_hint.setCursor(Qt.PointingHandCursor)
+        self.more_hint.setToolTip("Scroll down")
+        self.more_hint.setStyleSheet(
+            "QPushButton { color: #c0392b; font-weight: bold; border: none; padding: 3px; }"
+            "QPushButton:hover { text-decoration: underline; }"
+        )
+        self.more_hint.clicked.connect(lambda: bar.setValue(bar.maximum()))
+
+        def update_hint(*args):
+            self.more_hint.setVisible(bar.maximum() > 0 and bar.value() < bar.maximum() - 4)
+
+        bar.valueChanged.connect(update_hint)
+        bar.rangeChanged.connect(update_hint)
+        self.more_hint.setVisible(False)
+        panel_layout.addWidget(self.more_hint)
+
         panel_layout.addWidget(self.btn_freeze)
 
         # In the Tasks panel the standard "Close" button is used instead.
