@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (v0.4-dev)
+## 0.4.0
 - Options now open in FreeCAD's Tasks panel with a standard Close button (falls back to a window if another task dialog is open; `PANEL_MODE` at the top of the macro).
 - Panel is scrollable, with collapsible sections; Freeze Section stays visible at the bottom.
 
