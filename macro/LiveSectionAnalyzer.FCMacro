@@ -29,6 +29,13 @@ from PySide.QtGui import QIcon, QPixmap, QColor
 from PySide.QtCore import Qt, QTimer, QObject, QEvent
 
 try:
+    import numpy as np
+    HAS_NP = True
+except Exception:
+    np = None
+    HAS_NP = False
+
+try:
     from pivy import coin
     HAS_COIN = True
 except Exception:
@@ -54,6 +61,11 @@ GIZMO_PICK_PLANE = True
 # v0.5 (experimental): print per-update timings (slice / faces / fill / edges /
 # hatch / total, objects skipped by the bounding-box test) to the Report view.
 DEBUG_TIMING = True
+
+# v0.5 (experimental): while the plane is being dragged, objects whose exact slice
+# took longer than this many ms are shown as a fast outline computed from their
+# tessellation (numpy). The exact section is computed when the drag ends.
+FAST_PREVIEW_MS = 60
 
 # Max cached slices (all objects together).
 SLICE_CACHE_SIZE = 256
@@ -464,6 +476,8 @@ class _Target:
         self.label = obj.Label
         self.color = LiveSectionAnalyzer._display_color(obj)
         self.bbox = shape.BoundBox
+        self.slice_ms = 0.0         # duration of the last exact slice
+        self.mesh = None            # (vertices, triangles) numpy arrays, built on demand
         self.bg_feat = None
         self.bg_mode = None
         self.was_visible = True
@@ -486,6 +500,7 @@ class LiveSectionAnalyzer(QDockWidget):
         self.clip = None
         self.clip_parent = None
         self.clip_ok = False
+        self.preview = None
         self.gizmo = None
         self._gizmo_dragging = False
         self._gizmo_start_offset = 0.0
@@ -675,6 +690,33 @@ class LiveSectionAnalyzer(QDockWidget):
                 return color
         return (0.8, 0.8, 0.8)
 
+    def _create_preview_node(self):
+        """Coin node for the fast drag outline. It sits before the clip plane, so it is
+        never clipped (it lies exactly in the plane)."""
+        if not HAS_NP:
+            return
+        try:
+            sw = coin.SoSwitch()
+            sw.whichChild.setValue(coin.SO_SWITCH_NONE)
+            sep = coin.SoSeparator()
+            lm = coin.SoLightModel()
+            lm.model.setValue(coin.SoLightModel.BASE_COLOR)
+            col = coin.SoBaseColor()
+            col.rgb.setValue(0.0, 0.0, 0.0)
+            ds = coin.SoDrawStyle()
+            ds.lineWidth.setValue(2.0)
+            coords = coin.SoCoordinate3()
+            lines = coin.SoLineSet()
+            for node in (lm, col, ds, coords, lines):
+                sep.addChild(node)
+            sw.addChild(sep)
+            self.clip_parent.insertChild(sw, 0)
+            self.preview, self.preview_switch = sep, sw
+            self.preview_coords, self.preview_lines = coords, lines
+        except Exception as e:
+            App.Console.PrintWarning(f"Fast preview unavailable: {e}\n")
+            self.preview = None
+
     def create_features(self):
         """Create all features once"""
         doc = App.ActiveDocument
@@ -715,6 +757,7 @@ class LiveSectionAnalyzer(QDockWidget):
                 self.clip_parent = PlaneGizmo._render_group(view.getSceneGraph())
                 self.clip_parent.insertChild(self.clip, 0)
                 self.clip_ok = True
+                self._create_preview_node()
             except Exception as e:
                 App.Console.PrintWarning(f"Clip plane unavailable, using boolean mode: {e}\n")
                 self.clip = None
@@ -1286,6 +1329,58 @@ class LiveSectionAnalyzer(QDockWidget):
         tol = max(bb.DiagonalLength, 1.0) * 1e-6
         return abs(n.x * c.x + n.y * c.y + n.z * c.z - d) <= r + tol
 
+    def _slice_cached(self, t, plane_type, normal, plane_base):
+        return (t.key, plane_type, round(normal.dot(plane_base), 4)) in self._slice_cache
+
+    @staticmethod
+    def _tessellation(t):
+        """Vertices / triangles of the object as numpy arrays (built once)."""
+        if t.mesh is None:
+            tol = max(t.bbox.DiagonalLength * 1e-3, 1e-4)
+            verts, tris = t.shape.tessellate(tol)
+            t.mesh = (np.array([(v.x, v.y, v.z) for v in verts], dtype=float).reshape(-1, 3),
+                      np.array(tris, dtype=np.int64).reshape(-1, 3))
+        return t.mesh
+
+    def mesh_segments(self, t, normal, d):
+        """Intersection of the plane n.x = d with the tessellation: (k, 2, 3) segments."""
+        V, T = self._tessellation(t)
+        if len(T) == 0:
+            return np.zeros((0, 2, 3))
+        n = np.array((normal.x, normal.y, normal.z))
+        sv = V @ n - d
+        pos = sv[T] >= 0.0                              # (m, 3)
+        cnt = pos.sum(axis=1)
+        cut = (cnt == 1) | (cnt == 2)
+        if not cut.any():
+            return np.zeros((0, 2, 3))
+        P, sp, c1 = T[cut], pos[cut], (cnt[cut] == 1)
+        lone = np.where(c1, sp.argmax(axis=1), (~sp).argmax(axis=1))
+        r = np.arange(len(P))
+        ia, ib, ic = P[r, lone], P[r, (lone + 1) % 3], P[r, (lone + 2) % 3]
+        sa = sv[ia]
+
+        def cross(i_other):
+            so = sv[i_other]
+            f = (sa / (sa - so))[:, None]
+            return V[ia] + f * (V[i_other] - V[ia])
+
+        return np.stack((cross(ib), cross(ic)), axis=1)
+
+    def _show_preview(self, segs):
+        """Draw the fast outline (list of (k,2,3) arrays) or hide it when empty."""
+        if self.preview is None:
+            return
+        pts = [a for a in segs if len(a)]
+        if not pts:
+            self.preview_switch.whichChild.setValue(coin.SO_SWITCH_NONE)
+            return
+        arr = np.concatenate(pts).reshape(-1, 3)
+        k = len(arr) // 2
+        self.preview_coords.point.setValues(0, len(arr), arr.tolist())
+        self.preview_lines.numVertices.setValues(0, k, [2] * k)
+        self.preview_switch.whichChild.setValue(coin.SO_SWITCH_ALL)
+
     def get_slice(self, t, plane_type, normal, plane_base):
         """Section wires of one object via Shape.slice (cached)."""
         d = normal.dot(plane_base)
@@ -1295,11 +1390,13 @@ class LiveSectionAnalyzer(QDockWidget):
         key = (t.key, plane_type, round(d, 4))
         wires = self._slice_cache.get(key)
         if wires is None:
+            t0 = time.perf_counter()
             try:
                 wires = t.shape.slice(normal, d)
             except Exception as e:
                 App.Console.PrintWarning(f"Slice failed: {e}\n")
                 wires = []
+            t.slice_ms = (time.perf_counter() - t0) * 1e3
             if len(self._slice_cache) >= SLICE_CACHE_SIZE:
                 self._slice_cache.pop(next(iter(self._slice_cache)))
             self._slice_cache[key] = wires
@@ -1398,6 +1495,7 @@ class LiveSectionAnalyzer(QDockWidget):
         t_start = time.perf_counter()
         tm = {"slice": 0.0, "faces": 0.0, "fill": 0.0, "edges": 0.0, "hatch": 0.0, "bg": 0.0}
         self._skipped = 0
+        self._meshed = 0
 
         # While dragging the slider we only do the cheap parts
         quick = self.slider.isSliderDown() or self._gizmo_dragging
@@ -1439,11 +1537,23 @@ class LiveSectionAnalyzer(QDockWidget):
                 self._vis(t.bg_feat, True)
 
             tm["bg"] = time.perf_counter() - t0
+            self._meshed = 0
 
             # --- SECTION (slice) of every checked object ---
             wires, faces, face_colors = [], [], []
+            preview_segs = []
             for t in active:
                 t0 = time.perf_counter()
+                if (quick and self.preview is not None and t.slice_ms > FAST_PREVIEW_MS
+                        and not self._slice_cached(t, plane_type, normal, plane_base)):
+                    # expensive object while dragging: outline from the tessellation
+                    if self._plane_hits_bbox(t.bbox, normal, normal.dot(plane_base)):
+                        preview_segs.append(self.mesh_segments(t, normal, normal.dot(plane_base)))
+                        self._meshed += 1
+                    else:
+                        self._skipped += 1
+                    tm["slice"] += time.perf_counter() - t0
+                    continue
                 w = self.get_slice(t, plane_type, normal, plane_base)
                 tm["slice"] += time.perf_counter() - t0
                 if not w:
@@ -1455,6 +1565,8 @@ class LiveSectionAnalyzer(QDockWidget):
                 faces += f
                 shade = tuple(c * 0.75 for c in t.color[:3])
                 face_colors += [shade + (1.0,)] * len(f)
+
+            self._show_preview(preview_segs)
 
             if not wires:
                 self._vis(self.section_feat, False)
@@ -1512,12 +1624,15 @@ class LiveSectionAnalyzer(QDockWidget):
             if feat is not None:
                 feat.purgeTouched()
 
+        total = time.perf_counter() - t_start
+        # adaptive delay: after a slow update give the UI more time to collect events
+        self._timer.setInterval(int(min(250, max(60, total * 300))))
+
         if DEBUG_TIMING:
-            total = time.perf_counter() - t_start
             App.Console.PrintMessage(
-                "[LSA] %s %d obj (%d skipped by bbox) | bg %.0f  slice %.0f  faces %.0f  "
+                "[LSA] %s %d obj (%d skipped by bbox, %d mesh) | bg %.0f  slice %.0f  faces %.0f  "
                 "fill %.0f  edges %.0f  hatch %.0f | total %.0f ms\n" % (
-                    "drag" if quick else "full", len(active), self._skipped,
+                    "drag" if quick else "full", len(active), self._skipped, self._meshed,
                     tm["bg"] * 1e3, tm["slice"] * 1e3, tm["faces"] * 1e3,
                     tm["fill"] * 1e3, tm["edges"] * 1e3, tm["hatch"] * 1e3, total * 1e3))
 
@@ -1672,6 +1787,13 @@ class LiveSectionAnalyzer(QDockWidget):
         if self.gizmo is not None:
             self.gizmo.remove()
             self.gizmo = None
+
+        if self.preview is not None and self.clip_parent is not None:
+            try:
+                self.clip_parent.removeChild(self.preview_switch)
+            except Exception:
+                pass
+            self.preview = None
 
         # Remove clip plane from the scene graph before deleting its owner
         if self.clip is not None and self.clip_parent is not None:
