@@ -1,6 +1,7 @@
 # Changelog
 
 ## 0.4.0
+- **Multiple objects / assemblies:** an *Objects* list shows every visible solid. The plane clips everything on screen; the checked objects also get a section fill, outline and hatch, tinted with their own colors. Freeze Section copies all checked objects.
 - Options now open in FreeCAD's Tasks panel with a standard Close button (falls back to a window if another task dialog is open; `PANEL_MODE` at the top of the macro).
 - Fixed: parts inside assemblies, links and App::Part containers jumped to their local position; the section now uses the shape with all placements applied and hides only the selected instance.
 - Gizmo: bigger arrow pick area and the plane itself (surface and outline) can be dragged; `GIZMO_PICK_PLANE` turns the plane grab off.

@@ -9,6 +9,7 @@
 ## Özellikler
 
 - XY, XZ veya YZ düzleminde **canlı kesit**; kaydırıcı, sayı kutusu veya **3B görünümde gizmo sürükleyerek** hareket.
+- **Birden fazla obje ve montaj** – kesit alınacak parçaları listeden seçin; düzlem ekranda gördüğünüz her şeyi kırpar, böylece parçalar arası boşlukları kontrol edebilirsiniz. App::Part ve link içindeki parçalar montaj konumunu korur.
 - **Hızlı GPU kırpma** (Coin3D `SoClipPlane`) – her harekette boolean kesme yapılmaz; karmaşık parçalarda bile akıcıdır.
 - Gerçek kesitten (`Shape.slice`) üretilen **kesit konturu, dolgu ve tarama**; renk, çizgi kalınlığı, tarama aralığı ve nokta boyutu ayarlanabilir.
 - **Mirror Background** – parçanın karşı yarısını gösterir. Sadece kesme düzlemi değişir; obje hareket etmez.
@@ -29,7 +30,7 @@
 
 ## Kullanım
 
-1. Ağaçtan bir katı model seçin.
+1. Ağaçtan bir veya birkaç katı model seçin.
 2. Makroyu çalıştırın; yan panel açılır.
 3. Düzlemi (XY / XZ / YZ) seçin ve hareket ettirin: 3B görünümdeki turuncu oku sürükleyin veya kaydırıcı / sayı kutusunu kullanın.
 4. Panelden dolgu, kenar, tarama ve saydamlığı ayarlayın.
