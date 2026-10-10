@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0
+## 0.4.0 – 2026-10-10
 - The macro no longer needs a selection: with nothing selected it clips everything visible (scenes of up to 12 solids are sectioned completely, bigger ones start with nothing checked; `AUTO_SECTION_MAX_OBJECTS`).
 - **Multiple objects / assemblies:** an *Objects* list shows every visible solid. The plane clips everything on screen; the checked objects also get a section fill, outline and hatch, tinted with their own colors. Freeze Section copies all checked objects.
 - Options now open in FreeCAD's Tasks panel with a standard Close button (falls back to a window if another task dialog is open; `PANEL_MODE` at the top of the macro).

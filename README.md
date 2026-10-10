@@ -10,6 +10,7 @@
 
 - **Live section** on the XY, XZ or YZ plane, moved with a slider, a spin box or **by dragging a gizmo** in the 3D view.
 - **Multiple objects and assemblies** – pick the parts to section from a list; the plane clips everything you see, so you can check clearances between parts. Parts inside App::Part containers and links keep their assembly position.
+- **Options in FreeCAD's Tasks panel** – scrollable, collapsible sections, standard Close button (a floating window is available via `PANEL_MODE`).
 - **Fast GPU clipping** (Coin3D `SoClipPlane`) – the model is not re-cut with a boolean on every move, so even complex parts stay responsive.
 - **Section outline, fill and hatch** generated from the real cross-section (`Shape.slice`), with adjustable colors, line width, hatch spacing and point size.
 - **Mirror Background** – keep the opposite half of the part. Only the clipping plane changes; the object never moves.
@@ -37,12 +38,12 @@
 ## Usage
 
 1. Optionally select one or more solids (Part, Body, links, …) in the tree. Without a selection everything visible is clipped.
-2. Run the macro. A dock panel opens.
+2. Run the macro. The options open in the Tasks panel.
 3. Choose the plane (XY / XZ / YZ) and move it:
    - drag the orange arrow in the 3D view, or
    - use the slider / spin box.
 4. Tune appearance in the panel (fill, edges, hatch, transparency).
-5. Press **Freeze Section** to keep the result, **Close Analysis** to remove all temporary objects.
+5. Press **Freeze Section** to keep the result, **Close** to remove all temporary objects.
 
 ## Panel options
 
@@ -59,7 +60,7 @@
 
 ## Tested with
 
-- FreeCAD 1.1 and a 1.x/27.1 development build, Linux.
+- FreeCAD 1.1.4 and a 27.1 development build, Linux (Manjaro).
 - Windows and macOS are untested; reports welcome.
 
 ## Limitations
@@ -72,6 +73,7 @@
 
 ## Documentation
 
+- [Roadmap (v0.5 experiments)](docs/ROADMAP.md)
 - [Architecture notes](docs/ARCHITECTURE.md)
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)

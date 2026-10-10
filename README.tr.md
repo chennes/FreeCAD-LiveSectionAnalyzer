@@ -10,6 +10,7 @@
 
 - XY, XZ veya YZ düzleminde **canlı kesit**; kaydırıcı, sayı kutusu veya **3B görünümde gizmo sürükleyerek** hareket.
 - **Birden fazla obje ve montaj** – kesit alınacak parçaları listeden seçin; düzlem ekranda gördüğünüz her şeyi kırpar, böylece parçalar arası boşlukları kontrol edebilirsiniz. App::Part ve link içindeki parçalar montaj konumunu korur.
+- **FreeCAD'in Tasks panelinde seçenekler** – kaydırılabilir, açılır bölümler, standart Close düğmesi (`PANEL_MODE` ile yüzen pencere de seçilebilir).
 - **Hızlı GPU kırpma** (Coin3D `SoClipPlane`) – her harekette boolean kesme yapılmaz; karmaşık parçalarda bile akıcıdır.
 - Gerçek kesitten (`Shape.slice`) üretilen **kesit konturu, dolgu ve tarama**; renk, çizgi kalınlığı, tarama aralığı ve nokta boyutu ayarlanabilir.
 - **Mirror Background** – parçanın karşı yarısını gösterir. Sadece kesme düzlemi değişir; obje hareket etmez.
@@ -28,6 +29,8 @@
 2. FreeCAD makro klasörüne kopyalayın (**Makro → Makrolar…** yolu gösterir; Linux'ta genelde `~/.local/share/FreeCAD/Macro/`).
 3. **Makro → Makrolar…** üzerinden çalıştırın.
 
+Gelecek planlar için: [docs/ROADMAP.md](docs/ROADMAP.md)
+
 ## Kullanım
 
 1. İsterseniz ağaçtan bir veya birkaç katı model seçin. Seçim yoksa görünen her şey kırpılır.
@@ -38,7 +41,7 @@
 
 ## Test edilen sürümler
 
-FreeCAD 1.1 ve 1.x/27.1 geliştirme sürümü, Linux. Windows ve macOS test edilmedi.
+FreeCAD 1.1.4 ve 27.1 geliştirme sürümü, Linux (Manjaro). Windows ve macOS test edilmedi.
 
 ## Sınırlamalar
 
