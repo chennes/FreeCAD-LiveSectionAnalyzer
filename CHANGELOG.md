@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased (v0.5-experimental)
+
+- `DEBUG_TIMING`: per-update timings (background / slice / faces / fill / edges / hatch) in the Report view.
+- Objects the plane does not touch are skipped by a bounding-box test before slicing (~3x faster on a 60-solid demo).
+
 ## 0.4.0 – 2026-10-10
 - The macro no longer needs a selection: with nothing selected it clips everything visible (scenes of up to 12 solids are sectioned completely, bigger ones start with nothing checked; `AUTO_SECTION_MAX_OBJECTS`).
 - **Multiple objects / assemblies:** an *Objects* list shows every visible solid. The plane clips everything on screen; the checked objects also get a section fill, outline and hatch, tinted with their own colors. Freeze Section copies all checked objects.
