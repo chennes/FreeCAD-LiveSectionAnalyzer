@@ -19,7 +19,8 @@ import math
 from PySide.QtWidgets import (
     QColorDialog, QDockWidget, QDoubleSpinBox, QMessageBox, QLabel, QCheckBox,
     QRadioButton, QPushButton, QSlider, QSpinBox, QWidget,
-    QHBoxLayout, QVBoxLayout,
+    QHBoxLayout, QVBoxLayout, QScrollArea, QToolButton, QFrame,
+    QDialogButtonBox, QSizePolicy,
 )
 
 from PySide.QtCore import Qt, QTimer, QObject, QEvent
@@ -30,6 +31,12 @@ try:
 except Exception:
     coin = None
     HAS_COIN = False
+
+# Where the options panel lives:
+#   "task" -> FreeCAD's Tasks panel (Combo View), with scrolling and a Close button
+#   "dock" -> floating/dockable window
+# "task" falls back to "dock" automatically when another task dialog is open.
+PANEL_MODE = "task"
 
 # If the wrong half of the object is clipped away, flip this value.
 CLIP_KEEP_NEGATIVE = True
@@ -319,6 +326,68 @@ class PlaneGizmo:
             pass
 
 
+class _Collapsible(QWidget):
+    """A titled section that can be folded to keep the panel short."""
+
+    def __init__(self, title, expanded=True):
+        super().__init__()
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(2)
+
+        self._title = title
+        self.toggle = QToolButton()
+        self.toggle.setStyleSheet("QToolButton { border: none; font-weight: bold; }")
+        self.toggle.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.toggle.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.toggle.setCheckable(True)
+        self.toggle.setChecked(expanded)
+        self.toggle.clicked.connect(self._apply)
+        outer.addWidget(self.toggle)
+
+        self.body = QWidget()
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(12, 0, 0, 4)
+        outer.addWidget(self.body)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        outer.addWidget(line)
+        self._apply()
+
+    def _apply(self, *args):
+        on = self.toggle.isChecked()
+        self.toggle.setText(("\u25BE " if on else "\u25B8 ") + self._title)
+        self.body.setVisible(on)
+
+
+class SectionTaskPanel:
+    """Adapter that shows the options in FreeCAD's Tasks panel."""
+
+    def __init__(self, owner, widget):
+        self.owner = owner
+        self.form = widget
+
+    def getStandardButtons(self):
+        return int(QDialogButtonBox.Close)
+
+    def reject(self):
+        self.owner.shutdown(close_dialog=False)
+        return True
+
+    accept = reject
+
+    def isAllowedAlterSelection(self):
+        return True
+
+    def isAllowedAlterView(self):
+        return True
+
+    def isAllowedAlterDocument(self):
+        return True
+
+
 class LiveSectionAnalyzer(QDockWidget):
     def __init__(self):
         super().__init__()
@@ -326,6 +395,8 @@ class LiveSectionAnalyzer(QDockWidget):
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
 
         self._closed = False
+        self._mode = None             # "task" or "dock"
+        self.panel = None
         self.base_obj = None
         self.section_feat = None
         self.edge_feat = None
@@ -366,6 +437,7 @@ class LiveSectionAnalyzer(QDockWidget):
         self.update_style()
         self.update_section()
         self.init_done = True
+        self.show_panel()
 
     # ------------------------------------------------------------------
     # Setup
@@ -436,11 +508,17 @@ class LiveSectionAnalyzer(QDockWidget):
             feat.purgeTouched()
 
     def init_ui(self):
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
+        content = QWidget()
+        root = QVBoxLayout(content)
+        root.setContentsMargins(4, 4, 4, 4)
+
+        def section(title, expanded=True):
+            box = _Collapsible(title, expanded)
+            root.addWidget(box)
+            return box.body_layout
 
         # --- SECTION PLANE ---
-        layout.addWidget(QLabel("<b>Section Plane:</b>"))
+        layout = section("Section Plane")
         self.radio_xy = QRadioButton("XY Plane")
         self.radio_xz = QRadioButton("XZ Plane")
         self.radio_yz = QRadioButton("YZ Plane (Default)")
@@ -456,7 +534,7 @@ class LiveSectionAnalyzer(QDockWidget):
         layout.addWidget(self.chk_gizmo)
 
         # --- OFFSET ---
-        layout.addWidget(QLabel("<b>Offset (Position):</b>"))
+        layout = section("Offset (Position)")
 
         max_dim = max(self.x_len, self.y_len, self.z_len)
         self.offset_range = max(max_dim * 0.6, 10.0)
@@ -486,7 +564,7 @@ class LiveSectionAnalyzer(QDockWidget):
         layout.addWidget(range_label)
 
         # --- BACKGROUND SETTINGS ---
-        layout.addWidget(QLabel("<b>Background Settings:</b>"))
+        layout = section("Background")
 
         trans_layout = QHBoxLayout()
         trans_layout.addWidget(QLabel("Transparency (%):"))
@@ -518,7 +596,7 @@ class LiveSectionAnalyzer(QDockWidget):
         layout.addLayout(mirror_layout)
 
         # --- SECTION FILL ---
-        layout.addWidget(QLabel("<b>Section Fill:</b>"))
+        layout = section("Section Fill")
 
         # With GPU clipping the cut is open, so the fill acts as the cap: default on.
         self.chk_section_fill = QCheckBox("Show Section Fill")
@@ -535,7 +613,7 @@ class LiveSectionAnalyzer(QDockWidget):
         layout.addLayout(fill_color_layout)
 
         # --- EDGE LINE SETTINGS ---
-        layout.addWidget(QLabel("<b>Edge Line Settings:</b>"))
+        layout = section("Edge Lines")
 
         self.chk_edges = QCheckBox("Show Edge Lines")
         self.chk_edges.setChecked(True)
@@ -561,7 +639,7 @@ class LiveSectionAnalyzer(QDockWidget):
         layout.addLayout(edge_width_layout)
 
         # --- HATCH SETTINGS ---
-        layout.addWidget(QLabel("<b>Hatch Settings:</b>"))
+        layout = section("Hatch")
 
         self.chk_hatch = QCheckBox("Enable Hatch")
         self.chk_hatch.setChecked(True)
@@ -607,7 +685,6 @@ class LiveSectionAnalyzer(QDockWidget):
         layout.addLayout(hatch_point_layout)
 
         # --- FREEZE BUTTON ---
-        layout.addWidget(QLabel("<b>Freeze Section:</b>"))
         self.btn_freeze = QPushButton("❄️ Freeze Section (Simple Copy with Folder)")
         self.btn_freeze.setStyleSheet("""
             QPushButton {
@@ -622,7 +699,6 @@ class LiveSectionAnalyzer(QDockWidget):
             }
         """)
         self.btn_freeze.clicked.connect(self.freeze_section)
-        layout.addWidget(self.btn_freeze)
 
         # --- CONNECTIONS ---
         # Plane radios: only react to the button that became checked
@@ -648,15 +724,46 @@ class LiveSectionAnalyzer(QDockWidget):
         self.hatch_width_spin.valueChanged.connect(self.update_style)
         self.hatch_point_spin.valueChanged.connect(self.update_style)
 
-        # --- CLOSE BUTTON ---
+        root.addStretch()
+
+        # Scrollable options + a footer that is always visible
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+
+        panel = QWidget()
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.addWidget(scroll, 1)
+        panel_layout.addWidget(self.btn_freeze)
+
+        # In the Tasks panel the standard "Close" button is used instead.
         self.btn_close = QPushButton("Close Analysis")
         self.btn_close.clicked.connect(self.close)
-        layout.addWidget(self.btn_close)
+        panel_layout.addWidget(self.btn_close)
+        self.panel = panel
 
-        layout.addStretch()
-        widget.setLayout(layout)
-        self.setWidget(widget)
+    def show_panel(self):
+        """Show the options in the Tasks panel (default) or as a dock window."""
+        if PANEL_MODE == "task":
+            try:
+                if not Gui.Control.activeDialog():
+                    self.btn_close.setVisible(False)
+                    Gui.Control.showDialog(SectionTaskPanel(self, self.panel))
+                    self._mode = "task"
+                    return
+                App.Console.PrintMessage(
+                    "Another task dialog is open - showing the section panel as a window.\n"
+                )
+            except Exception as e:
+                App.Console.PrintWarning(f"Tasks panel unavailable ({e}), using a window.\n")
+        self.btn_close.setVisible(True)
+        self._mode = "dock"
+        self.setWidget(self.panel)
         Gui.getMainWindow().addDockWidget(Qt.LeftDockWidgetArea, self)
+        self.show()
 
     # ------------------------------------------------------------------
     # UI event handlers (cheap: they never do geometry work directly)
@@ -1136,12 +1243,17 @@ class LiveSectionAnalyzer(QDockWidget):
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
-    def closeEvent(self, event):
-        """Cleanup on close"""
+    def shutdown(self, close_dialog=True):
+        """Remove everything the macro created. Safe to call more than once."""
         if self._closed:
-            super().closeEvent(event)
             return
         self._closed = True
+
+        if self._mode == "task" and close_dialog:
+            try:
+                Gui.Control.closeDialog()
+            except Exception:
+                pass
 
         try:
             self._timer.stop()
@@ -1179,6 +1291,14 @@ class LiveSectionAnalyzer(QDockWidget):
                         pass
 
         self._slice_cache.clear()
+
+        if self._mode == "task":
+            # The Tasks panel owns the form; the unused dock can simply go.
+            self.deleteLater()
+
+    def closeEvent(self, event):
+        """Dock-window close (also used when the macro is started again)"""
+        self.shutdown()
         super().closeEvent(event)
 
         # Fully remove the dock so repeated runs don't leave hidden docks behind
