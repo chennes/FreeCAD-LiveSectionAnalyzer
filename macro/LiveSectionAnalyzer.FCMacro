@@ -446,6 +446,7 @@ class LiveSectionAnalyzer(QDockWidget):
         self._mode = None             # "task" or "dock"
         self.panel = None
         self.base_obj = None
+        self.base_shape = None        # selected shape in global coordinates
         self.section_feat = None
         self.edge_feat = None
         self.hatch_feat = None
@@ -466,7 +467,7 @@ class LiveSectionAnalyzer(QDockWidget):
             self._closed = True
             return
 
-        self.bbox = self.base_obj.Shape.BoundBox
+        self.bbox = self.base_shape.BoundBox
 
         self.x_len = self.bbox.XMax - self.bbox.XMin
         self.y_len = self.bbox.YMax - self.bbox.YMin
@@ -490,16 +491,66 @@ class LiveSectionAnalyzer(QDockWidget):
     # ------------------------------------------------------------------
     # Setup
     # ------------------------------------------------------------------
+    # Selected objects that only hold other objects: the part to section is the
+    # first child in the selection path.
+    _CONTAINERS = ("App::Part", "Assembly::AssemblyObject", "App::LinkGroup",
+                   "App::DocumentObjectGroup")
+
     def get_selection(self):
-        sel = Gui.Selection.getSelection()
-        if not sel:
+        """Resolve the selection to (display object, shape in GLOBAL coordinates).
+
+        getSelection() returns the leaf object (e.g. a Pocket inside a linked
+        Body), whose shape lacks the placement of the assembly / link / part it
+        sits in. getSelectionEx(resolve=0) keeps the full path, and
+        Part.getShape() applies every placement along it.
+        """
+        sels = Gui.Selection.getSelectionEx("", 0)
+        if not sels:
             QMessageBox.warning(None, "Error", "Please select a part from the Tree View first!")
             return None
-        obj = sel[0]
-        if not hasattr(obj, "Shape") or obj.Shape.isNull():
-            QMessageBox.warning(None, "Error", "Selected object has no valid shape!")
-            return None
-        return obj
+        top = sels[0].Object
+        sub = sels[0].SubElementNames[0] if sels[0].SubElementNames else ""
+
+        shape = None
+        try:
+            shape = Part.getShape(top, sub, needSubElement=False, refine=False)
+        except Exception:
+            pass
+        if shape is None or shape.isNull():
+            if hasattr(top, "Shape") and not top.Shape.isNull():
+                shape = top.Shape
+            else:
+                QMessageBox.warning(None, "Error", "Selected object has no valid shape!")
+                return None
+        if shape.ShapeType == "Compound" and len(shape.Solids) == 1:
+            shape = shape.Solids[0]
+        self.base_shape = shape
+
+        # Object that gets hidden while the section is shown
+        target = top
+        if sub and top.TypeId in self._CONTAINERS:
+            try:
+                first = top.resolve(sub.split(".")[0] + ".")[0]
+                if first is not None:
+                    target = first
+            except Exception:
+                pass
+        return target
+
+    @staticmethod
+    def _display_color(obj):
+        """Shape color of an object, following links to the real object."""
+        candidates = [obj, getattr(obj, "LinkedObject", None)]
+        try:
+            candidates.append(obj.getLinkedObject(True))
+        except Exception:
+            pass
+        for o in candidates:
+            vo = getattr(o, "ViewObject", None) if o is not None else None
+            color = getattr(vo, "ShapeColor", None) if vo is not None else None
+            if color:
+                return color
+        return (0.8, 0.8, 0.8)
 
     def create_features(self):
         """Create all features once"""
@@ -509,7 +560,7 @@ class LiveSectionAnalyzer(QDockWidget):
 
         # Background object
         self.bg_feat = doc.addObject("Part::Feature", "Live_Section_Background")
-        self.bg_feat.ViewObject.ShapeColor = self.base_obj.ViewObject.ShapeColor
+        self.bg_feat.ViewObject.ShapeColor = self._display_color(self.base_obj)
         self.bg_feat.ViewObject.DisplayMode = "Shaded"
         self.bg_feat.ViewObject.Transparency = 70
 
@@ -1011,7 +1062,7 @@ class LiveSectionAnalyzer(QDockWidget):
             cutter.rotate(App.Vector(0, 0, 0), App.Vector(1, 0, 0), -90)
 
         cutter.translate(plane_base)
-        return self.base_obj.Shape.cut(cutter)
+        return self.base_shape.cut(cutter)
 
     def get_slice(self, plane_type, normal, plane_base):
         """Section wires via Shape.slice (cached)."""
@@ -1020,7 +1071,7 @@ class LiveSectionAnalyzer(QDockWidget):
         wires = self._slice_cache.get(key)
         if wires is None:
             try:
-                wires = self.base_obj.Shape.slice(normal, d)
+                wires = self.base_shape.slice(normal, d)
             except Exception as e:
                 App.Console.PrintWarning(f"Slice failed: {e}\n")
                 wires = []
@@ -1126,7 +1177,7 @@ class LiveSectionAnalyzer(QDockWidget):
             # --- BACKGROUND ---
             if use_clip:
                 if self._bg_mode != "clip":
-                    self.bg_feat.Shape = self.base_obj.Shape   # tessellated once
+                    self.bg_feat.Shape = self.base_shape   # tessellated once
                     # The clipped solid is open, so back faces become visible;
                     # one-sided lighting avoids their yellowish tint.
                     self._set(self.bg_feat.ViewObject, "Lighting", "One side")
