@@ -21,6 +21,28 @@ node; the exact section is computed when the drag ends. Test part (80-tooth gear
 exact slice ~830 ms, mesh outline ~0.5 ms (length differs by 0.06 %); a full drag update went from
 ~520 ms to ~9 ms. The exact slice on release is still a single blocking call (see item 4).
 
+## Status (2026-10-10)
+
+- v0.4.0 is released. v0.5-experimental has timing output, bbox skipping, fast drag preview and
+  adaptive delay; tested by the author on a real gear assembly (drag updates ~2 ms, no leftover lines
+  after the stale-segment fix `da416e5`). Announced on the FreeCAD forum; waiting for feedback.
+- Real-assembly timings (2 solids): exact slice 200-540 ms, up to ~2.5 s where the plane cuts the
+  gear teeth; hatch 12-35 ms, fill/edges a few ms. Slicing with OpenCascade is the only real cost.
+
+## Next: mesh-based section pipeline (flag `MESH_SECTION`, idea stage)
+
+Build contour, hatch and fill from the tessellation instead of OpenCascade, keep the old path
+for comparison and for *Freeze*:
+
+1. Contour: chain the plane/triangle segments into closed loops (key the cut points by mesh edge id).
+2. Hatch: scanline clipping of the hatch lines against the loops (even-odd rule, holes for free),
+   drawn as Coin line nodes; per-object angle/spacing so neighbouring parts hatch differently.
+3. Fill: Coin polygons from the loops (holes need a small triangulation, e.g. keyhole bridging).
+4. Exact geometry only for *Freeze*; mesh tolerance configurable, finer mesh after a drag ends.
+Trade-off: curves look polygonal at coarse tolerance.
+
+Also open: incremental exact updates (item 4), hatch/fill during drag.
+
 ## Ideas after that
 
 - Arbitrary plane direction (angles / "align to view").
