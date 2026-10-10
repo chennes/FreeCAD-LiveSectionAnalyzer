@@ -370,7 +370,11 @@ class SectionTaskPanel:
         self.form = widget
 
     def getStandardButtons(self):
-        return int(QDialogButtonBox.Close)
+        btn = QDialogButtonBox.Close
+        try:
+            return int(btn)           # PySide2
+        except TypeError:
+            return btn.value          # PySide6 (enum flag)
 
     def reject(self):
         self.owner.shutdown(close_dialog=False)
