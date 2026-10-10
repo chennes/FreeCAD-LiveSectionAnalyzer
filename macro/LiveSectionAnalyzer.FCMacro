@@ -53,6 +53,10 @@ GIZMO_PICK_PLANE = True
 # Max cached slices (all objects together).
 SLICE_CACHE_SIZE = 256
 
+# With nothing selected, scenes up to this many visible solids are sectioned
+# completely; bigger scenes start with nothing checked.
+AUTO_SECTION_MAX_OBJECTS = 12
+
 # The section fill / edges / hatch lie exactly in the clip plane. They are
 # nudged by this fraction of the model size so the clip does not cut them.
 OVERLAY_OFFSET_REL = 1e-4
@@ -487,7 +491,7 @@ class LiveSectionAnalyzer(QDockWidget):
             return
 
         # Plane center follows the selected objects; ranges follow the whole scene
-        picked = [t.shape for t in self.targets if t.checked]
+        picked = [t.shape for t in self.targets if t.checked] or [t.shape for t in self.targets]
         self.bbox = self._union_bbox(picked)
         scene = self._union_bbox([t.shape for t in self.targets])
         self.x_len = scene.XMax - scene.XMin
@@ -623,10 +627,17 @@ class LiveSectionAnalyzer(QDockWidget):
                     continue
                 seen.add(key)
                 picked.append(_Target(obj, shape, checked=True))
+        scene = self._scene_targets(skip_keys=seen)
         if not picked:
-            QMessageBox.warning(None, "Error", "Please select a part from the Tree View first!")
-            return False
-        self.targets = picked + self._scene_targets(skip_keys=seen)
+            # Nothing selected: clip everything that is visible. A small scene is
+            # sectioned completely, a big one starts unchecked (check what you need).
+            if not scene:
+                QMessageBox.warning(None, "Error", "There are no visible solids in the active document.")
+                return False
+            if len(scene) <= AUTO_SECTION_MAX_OBJECTS:
+                for t in scene:
+                    t.checked = True
+        self.targets = picked + scene
         return True
 
     def rescan_objects(self):
