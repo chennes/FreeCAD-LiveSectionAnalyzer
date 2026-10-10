@@ -20,8 +20,10 @@ from PySide.QtWidgets import (
     QColorDialog, QDockWidget, QDoubleSpinBox, QMessageBox, QLabel, QCheckBox,
     QRadioButton, QPushButton, QSlider, QSpinBox, QWidget,
     QHBoxLayout, QVBoxLayout, QScrollArea, QToolButton, QFrame,
-    QDialogButtonBox, QSizePolicy,
+    QDialogButtonBox, QSizePolicy, QListWidget, QListWidgetItem,
 )
+
+from PySide.QtGui import QIcon, QPixmap, QColor
 
 from PySide.QtCore import Qt, QTimer, QObject, QEvent
 
@@ -48,8 +50,12 @@ MAX_HATCH_LINES = 1500
 # on the arrow. Set to False if you need to click objects behind the plane.
 GIZMO_PICK_PLANE = True
 
-# Max cached slices.
-SLICE_CACHE_SIZE = 64
+# Max cached slices (all objects together).
+SLICE_CACHE_SIZE = 256
+
+# The section fill / edges / hatch lie exactly in the clip plane. They are
+# nudged by this fraction of the model size so the clip does not cut them.
+OVERLAY_OFFSET_REL = 1e-4
 
 
 class _GizmoEventFilter(QObject):
@@ -101,7 +107,9 @@ class PlaneGizmo:
 
         self._build_scene()
         self.sg = self._render_group(view.getSceneGraph())
-        self.sg.addChild(self.root)
+        # first child: the scene-wide clip plane (added later) comes after it,
+        # so the gizmo itself is never clipped
+        self.sg.insertChild(self.root, 0)
 
         self._filter = _GizmoEventFilter(self)
         self.widget.installEventFilter(self._filter)
@@ -436,6 +444,21 @@ class SectionTaskPanel:
         return True
 
 
+class _Target:
+    """One object of the scene: its global shape and (when sectioned) its copy."""
+
+    def __init__(self, obj, shape, checked=False):
+        self.obj = obj
+        self.shape = shape
+        self.checked = checked
+        self.key = (obj.Document.Name, obj.Name)
+        self.label = obj.Label
+        self.color = LiveSectionAnalyzer._display_color(obj)
+        self.bg_feat = None
+        self.bg_mode = None
+        self.was_visible = True
+
+
 class LiveSectionAnalyzer(QDockWidget):
     def __init__(self):
         super().__init__()
@@ -445,33 +468,31 @@ class LiveSectionAnalyzer(QDockWidget):
         self._closed = False
         self._mode = None             # "task" or "dock"
         self.panel = None
-        self.base_obj = None
-        self.base_shape = None        # selected shape in global coordinates
+        self.targets = []             # all listed objects (checked = sectioned)
         self.section_feat = None
         self.edge_feat = None
         self.hatch_feat = None
-        self.bg_feat = None
         self.frozen_group = None
         self.clip = None
         self.clip_parent = None
         self.clip_ok = False
-        self._bg_mode = None          # "clip" or "solid"
         self.gizmo = None
         self._gizmo_dragging = False
         self._gizmo_start_offset = 0.0
         self._slice_cache = {}
         self.init_done = False
 
-        self.base_obj = self.get_selection()
-        if not self.base_obj:
+        if not self._collect_targets():
             self._closed = True
             return
 
-        self.bbox = self.base_shape.BoundBox
-
-        self.x_len = self.bbox.XMax - self.bbox.XMin
-        self.y_len = self.bbox.YMax - self.bbox.YMin
-        self.z_len = self.bbox.ZMax - self.bbox.ZMin
+        # Plane center follows the selected objects; ranges follow the whole scene
+        picked = [t.shape for t in self.targets if t.checked]
+        self.bbox = self._union_bbox(picked)
+        scene = self._union_bbox([t.shape for t in self.targets])
+        self.x_len = scene.XMax - scene.XMin
+        self.y_len = scene.YMax - scene.YMin
+        self.z_len = scene.ZMax - scene.ZMin
 
         # Debounce timer: many UI events -> a single update
         self._timer = QTimer(self)
@@ -496,21 +517,26 @@ class LiveSectionAnalyzer(QDockWidget):
     _CONTAINERS = ("App::Part", "Assembly::AssemblyObject", "App::LinkGroup",
                    "App::DocumentObjectGroup")
 
-    def get_selection(self):
-        """Resolve the selection to (display object, shape in GLOBAL coordinates).
+    @staticmethod
+    def _union_bbox(shapes):
+        bb = App.BoundBox()
+        for sh in shapes:
+            bb.add(sh.BoundBox)
+        return bb
+
+    @staticmethod
+    def _solid_or_compound(shape):
+        if shape.ShapeType == "Compound" and len(shape.Solids) == 1:
+            return shape.Solids[0]
+        return shape
+
+    def _resolve_entry(self, top, sub):
+        """Selection entry -> (display object, shape in GLOBAL coordinates).
 
         getSelection() returns the leaf object (e.g. a Pocket inside a linked
         Body), whose shape lacks the placement of the assembly / link / part it
-        sits in. getSelectionEx(resolve=0) keeps the full path, and
-        Part.getShape() applies every placement along it.
+        sits in. With the full path, Part.getShape() applies every placement.
         """
-        sels = Gui.Selection.getSelectionEx("", 0)
-        if not sels:
-            QMessageBox.warning(None, "Error", "Please select a part from the Tree View first!")
-            return None
-        top = sels[0].Object
-        sub = sels[0].SubElementNames[0] if sels[0].SubElementNames else ""
-
         shape = None
         try:
             shape = Part.getShape(top, sub, needSubElement=False, refine=False)
@@ -520,13 +546,9 @@ class LiveSectionAnalyzer(QDockWidget):
             if hasattr(top, "Shape") and not top.Shape.isNull():
                 shape = top.Shape
             else:
-                QMessageBox.warning(None, "Error", "Selected object has no valid shape!")
-                return None
-        if shape.ShapeType == "Compound" and len(shape.Solids) == 1:
-            shape = shape.Solids[0]
-        self.base_shape = shape
+                return None, None
 
-        # Object that gets hidden while the section is shown
+        # The object that gets hidden while the section is shown
         target = top
         if sub and top.TypeId in self._CONTAINERS:
             try:
@@ -535,7 +557,90 @@ class LiveSectionAnalyzer(QDockWidget):
                     target = first
             except Exception:
                 pass
-        return target
+        return target, self._solid_or_compound(shape)
+
+    def _global_shape(self, obj):
+        """Shape of a scene object with the placements of all its parents."""
+        chain, cur = [], obj
+        while True:
+            try:
+                parent = cur.getParentGeoFeatureGroup()
+            except Exception:
+                parent = None
+            if parent is None:
+                break
+            chain.insert(0, cur.Name)
+            cur = parent
+        sub = ".".join(chain) + "." if chain else ""
+        shape = Part.getShape(cur, sub, needSubElement=False, refine=False)
+        return self._solid_or_compound(shape)
+
+    def _scene_targets(self, skip_keys=()):
+        """Visible solids of the active document (not the macro's own objects)."""
+        found = []
+        doc = App.ActiveDocument
+        if not doc:
+            return found
+        for obj in doc.Objects:
+            try:
+                if obj.Name.startswith(("Live_", "Section_")) or obj.TypeId in self._CONTAINERS:
+                    continue
+                vo = obj.ViewObject
+                if vo is None or not hasattr(obj, "Shape") or not vo.Visibility:
+                    continue
+                if (obj.Document.Name, obj.Name) in skip_keys:
+                    continue
+                parent = obj.getParentGeoFeatureGroup()
+                if parent is not None and parent.TypeId == "PartDesign::Body":
+                    continue                      # features inside a Body: the Body is listed
+                hidden_parent = False
+                while parent is not None:
+                    if parent.ViewObject is not None and not parent.ViewObject.Visibility:
+                        hidden_parent = True
+                        break
+                    parent = parent.getParentGeoFeatureGroup()
+                if hidden_parent:
+                    continue
+                shape = self._global_shape(obj)
+                if shape.isNull() or not shape.Solids:
+                    continue
+                found.append(_Target(obj, shape))
+            except Exception:
+                continue
+        found.sort(key=lambda t: t.label.lower())
+        return found
+
+    def _collect_targets(self):
+        """Selected objects (checked) + every other visible solid (unchecked)."""
+        picked, seen = [], set()
+        for sel in Gui.Selection.getSelectionEx("", 0):
+            for sub in (sel.SubElementNames or [""]):
+                obj, shape = self._resolve_entry(sel.Object, sub)
+                if obj is None:
+                    continue
+                key = (obj.Document.Name, obj.Name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                picked.append(_Target(obj, shape, checked=True))
+        if not picked:
+            QMessageBox.warning(None, "Error", "Please select a part from the Tree View first!")
+            return False
+        self.targets = picked + self._scene_targets(skip_keys=seen)
+        return True
+
+    def rescan_objects(self):
+        """Re-read the visible solids; keeps the objects that are being sectioned."""
+        if self._closed:
+            return
+        kept = [t for t in self.targets if t.checked]
+        keys = {t.key for t in kept}
+        dropped = [t for t in self.targets if not t.checked]
+        for t in dropped:
+            self._release(t)
+        self.targets = kept + self._scene_targets(skip_keys=keys)
+        self._fill_list()
+        self.schedule_update()
 
     @staticmethod
     def _display_color(obj):
@@ -557,12 +662,6 @@ class LiveSectionAnalyzer(QDockWidget):
         doc = App.ActiveDocument
         if not doc:
             return
-
-        # Background object
-        self.bg_feat = doc.addObject("Part::Feature", "Live_Section_Background")
-        self.bg_feat.ViewObject.ShapeColor = self._display_color(self.base_obj)
-        self.bg_feat.ViewObject.DisplayMode = "Shaded"
-        self.bg_feat.ViewObject.Transparency = 70
 
         # Section fill
         self.section_feat = doc.addObject("Part::Feature", "Live_Section_Fill")
@@ -589,12 +688,13 @@ class LiveSectionAnalyzer(QDockWidget):
         self.hatch_feat.ViewObject.Visibility = False
         self.hatch_feat.ViewObject.PointSize = 1
 
-        # GPU clip plane attached to the background object's scene graph
+        # One GPU clip plane at the root of the 3D view clips EVERYTHING that is shown
         if HAS_COIN:
             try:
                 self.clip = coin.SoClipPlane()
                 self.clip.on.setValue(False)
-                self.clip_parent = self.bg_feat.ViewObject.RootNode
+                view = Gui.ActiveDocument.ActiveView
+                self.clip_parent = PlaneGizmo._render_group(view.getSceneGraph())
                 self.clip_parent.insertChild(self.clip, 0)
                 self.clip_ok = True
             except Exception as e:
@@ -603,7 +703,7 @@ class LiveSectionAnalyzer(QDockWidget):
                 self.clip_parent = None
                 self.clip_ok = False
 
-        for feat in (self.bg_feat, self.section_feat, self.edge_feat, self.hatch_feat):
+        for feat in (self.section_feat, self.edge_feat, self.hatch_feat):
             feat.purgeTouched()
 
     def init_ui(self):
@@ -615,6 +715,26 @@ class LiveSectionAnalyzer(QDockWidget):
             box = _Collapsible(title, expanded)
             root.addWidget(box)
             return box.body_layout
+
+        # --- OBJECTS ---
+        layout = section("Objects (checked = section)")
+        self.obj_list = QListWidget()
+        self.obj_list.setMinimumHeight(110)
+        self.obj_list.setToolTip(
+            "Everything visible is clipped by the plane.\n"
+            "Checked objects also get a section fill, outline and hatch."
+        )
+        layout.addWidget(self.obj_list)
+        row = QHBoxLayout()
+        for text, slot in (("All", lambda: self._check_all(True)),
+                           ("None", lambda: self._check_all(False)),
+                           ("Refresh", self.rescan_objects)):
+            b = QPushButton(text)
+            b.clicked.connect(slot)
+            row.addWidget(b)
+        layout.addLayout(row)
+        self._fill_list()
+        self.obj_list.itemChanged.connect(self.on_target_toggled)
 
         # --- SECTION PLANE ---
         layout = section("Section Plane")
@@ -701,6 +821,11 @@ class LiveSectionAnalyzer(QDockWidget):
         self.chk_section_fill = QCheckBox("Show Section Fill")
         self.chk_section_fill.setChecked(True)
         layout.addWidget(self.chk_section_fill)
+
+        self.chk_obj_colors = QCheckBox("Use object colors")
+        self.chk_obj_colors.setChecked(sum(1 for t in self.targets if t.checked) > 1)
+        self.chk_obj_colors.setToolTip("Tint each object's section with its own color")
+        layout.addWidget(self.chk_obj_colors)
 
         fill_color_layout = QHBoxLayout()
         fill_color_layout.addWidget(QLabel("Color:"))
@@ -813,6 +938,7 @@ class LiveSectionAnalyzer(QDockWidget):
         self.chk_mirror_bg.stateChanged.connect(self.schedule_update)
         self.chk_gpu_clip.stateChanged.connect(self.schedule_update)
         self.chk_section_fill.stateChanged.connect(self.schedule_update)
+        self.chk_obj_colors.stateChanged.connect(self.schedule_update)
         self.chk_hatch.stateChanged.connect(self.schedule_update)
         self.spin_spacing.valueChanged.connect(self.schedule_update)
         self.chk_edges.stateChanged.connect(self.schedule_update)
@@ -896,6 +1022,39 @@ class LiveSectionAnalyzer(QDockWidget):
         # happen every interval instead of only after the movement stops.
         if not self._timer.isActive():
             self._timer.start()
+
+    def _fill_list(self):
+        self.obj_list.blockSignals(True)
+        self.obj_list.clear()
+        for t in self.targets:
+            item = QListWidgetItem(t.label)
+            item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            item.setCheckState(Qt.Checked if t.checked else Qt.Unchecked)
+            item.setData(Qt.UserRole, t.key)
+            pm = QPixmap(14, 14)
+            r, g, b = (int(max(0.0, min(1.0, c)) * 255) for c in t.color[:3])
+            pm.fill(QColor(r, g, b))
+            item.setIcon(QIcon(pm))
+            self.obj_list.addItem(item)
+        self.obj_list.blockSignals(False)
+
+    def on_target_toggled(self, item):
+        if self._closed:
+            return
+        key = item.data(Qt.UserRole)
+        for t in self.targets:
+            if t.key == key:
+                t.checked = item.checkState() == Qt.Checked
+        self.schedule_update()
+
+    def _check_all(self, flag):
+        self.obj_list.blockSignals(True)
+        for i in range(self.obj_list.count()):
+            self.obj_list.item(i).setCheckState(Qt.Checked if flag else Qt.Unchecked)
+        self.obj_list.blockSignals(False)
+        for t in self.targets:
+            t.checked = bool(flag)
+        self.schedule_update()
 
     def on_plane_toggled(self, checked):
         if checked:
@@ -1009,15 +1168,52 @@ class LiveSectionAnalyzer(QDockWidget):
             setattr(vo, prop, value)
 
     def update_style(self, *args):
-        if self._closed or not self.bg_feat:
+        if self._closed or not self.targets:
             return
-        self._set(self.bg_feat.ViewObject, "Transparency", self.spin_trans.value())
+        for t in self.targets:
+            if t.bg_feat is not None:
+                self._set(t.bg_feat.ViewObject, "Transparency", self.spin_trans.value())
         self._set(self.edge_feat.ViewObject, "LineWidth", self.edge_width_spin.value())
         self._set(self.hatch_feat.ViewObject, "LineWidth", self.hatch_width_spin.value())
         self._set(self.hatch_feat.ViewObject, "PointSize", self.hatch_point_spin.value())
 
     def _vis(self, feat, flag):
         self._set(feat.ViewObject, "Visibility", bool(flag))
+
+    def _release(self, t):
+        """Remove a target's background copy and show the original again."""
+        if t.bg_feat is not None:
+            try:
+                doc = t.bg_feat.Document
+                if doc.getObject(t.bg_feat.Name):
+                    doc.removeObject(t.bg_feat.Name)
+            except Exception:
+                pass
+            t.bg_feat = None
+            t.bg_mode = None
+            try:
+                t.obj.ViewObject.Visibility = t.was_visible
+            except Exception:
+                pass
+
+    def _sync_targets(self):
+        """Create / remove the background copies so they match the checked list."""
+        doc = App.ActiveDocument
+        if not doc:
+            return
+        trans = self.spin_trans.value() if hasattr(self, "spin_trans") else 70
+        for t in self.targets:
+            if t.checked and t.bg_feat is None:
+                t.was_visible = bool(t.obj.ViewObject.Visibility)
+                feat = doc.addObject("Part::Feature", "Live_Section_Background")
+                feat.ViewObject.ShapeColor = t.color
+                feat.ViewObject.DisplayMode = "Shaded"
+                feat.ViewObject.Transparency = trans
+                feat.purgeTouched()
+                t.bg_feat = feat
+                t.bg_mode = None
+            elif not t.checked and t.bg_feat is not None:
+                self._release(t)
 
     # ------------------------------------------------------------------
     # Geometry helpers
@@ -1044,13 +1240,13 @@ class LiveSectionAnalyzer(QDockWidget):
             d = -d
         self.clip.plane.setValue(coin.SbPlane(coin.SbVec3f(n.x, n.y, n.z), d))
 
-    def compute_cut_solid(self, plane_type, normal, plane_base, flip=False):
+    def compute_cut_solid(self, shape, plane_type, normal, plane_base, flip=False):
         """Exact boolean cut (slow). Used when GPU clipping is off and for freezing.
 
         flip=True keeps the opposite half. The geometry itself is never moved
         or reflected, so the object stays where it is while the plane moves.
         """
-        size = max(self.x_len, self.y_len, self.z_len) * 3
+        size = max(self.x_len, self.y_len, self.z_len) * 4
         cutter = Part.makeBox(size, size, size)
         # local +Z is the plane normal; the cutter removes the +normal side,
         # or the -normal side when flipped
@@ -1062,16 +1258,16 @@ class LiveSectionAnalyzer(QDockWidget):
             cutter.rotate(App.Vector(0, 0, 0), App.Vector(1, 0, 0), -90)
 
         cutter.translate(plane_base)
-        return self.base_shape.cut(cutter)
+        return shape.cut(cutter)
 
-    def get_slice(self, plane_type, normal, plane_base):
-        """Section wires via Shape.slice (cached)."""
+    def get_slice(self, t, plane_type, normal, plane_base):
+        """Section wires of one object via Shape.slice (cached)."""
         d = normal.dot(plane_base)
-        key = (plane_type, round(d, 4))
+        key = (t.key, plane_type, round(d, 4))
         wires = self._slice_cache.get(key)
         if wires is None:
             try:
-                wires = self.base_shape.slice(normal, d)
+                wires = t.shape.slice(normal, d)
             except Exception as e:
                 App.Console.PrintWarning(f"Slice failed: {e}\n")
                 wires = []
@@ -1153,8 +1349,17 @@ class LiveSectionAnalyzer(QDockWidget):
     # ------------------------------------------------------------------
     # Main update
     # ------------------------------------------------------------------
+    def _overlay_pose(self, normal, flip, use_clip):
+        """Offset of the in-plane overlays (see OVERLAY_OFFSET_REL)."""
+        eps = max(self.x_len, self.y_len, self.z_len) * OVERLAY_OFFSET_REL
+        keep = App.Vector(normal)
+        if CLIP_KEEP_NEGATIVE != bool(flip):
+            keep = App.Vector(-keep.x, -keep.y, -keep.z)    # side that stays visible
+        # clip mode: just inside the kept half; boolean mode: just in front of the cut face
+        return App.Placement(keep * (eps if use_clip else -eps), App.Rotation())
+
     def update_section(self):
-        if self._closed or not self.base_obj or not self.bg_feat:
+        if self._closed or not self.targets:
             return
         doc = App.ActiveDocument
         if not doc:
@@ -1165,41 +1370,52 @@ class LiveSectionAnalyzer(QDockWidget):
         # While dragging the slider we only do the cheap parts
         quick = self.slider.isSliderDown() or self._gizmo_dragging
 
-        self._vis(self.base_obj, False)
+        self._sync_targets()
+        active = [t for t in self.targets if t.checked]
 
         plane_type, normal, plane_base, center_pos = self.get_plane()
         flip = self.chk_mirror_bg.isChecked()
         use_clip = self.clip_ok and self.chk_gpu_clip.isChecked()
+        pose = self._overlay_pose(normal, flip, use_clip)
 
         self.sync_gizmo(plane_type, normal, plane_base)
 
         try:
-            # --- BACKGROUND ---
+            # --- CLIP: the whole scene (GPU mode) ---
             if use_clip:
-                if self._bg_mode != "clip":
-                    self.bg_feat.Shape = self.base_shape   # tessellated once
-                    # The clipped solid is open, so back faces become visible;
-                    # one-sided lighting avoids their yellowish tint.
-                    self._set(self.bg_feat.ViewObject, "Lighting", "One side")
-                    self._bg_mode = "clip"
                 self.set_clip(normal, plane_base, flip)
                 self.clip.on.setValue(True)
-            else:
-                if self.clip_ok:
-                    self.clip.on.setValue(False)
-                if quick:
-                    # keep the previous solid while dragging in boolean mode
-                    # (only recompute when the slider is released)
-                    pass
-                else:
-                    self.bg_feat.Shape = self.compute_cut_solid(plane_type, normal, plane_base, flip)
-                    self._set(self.bg_feat.ViewObject, "Lighting", "Two side")
-                    self._bg_mode = "solid"
-            self._vis(self.bg_feat, True)
+            elif self.clip_ok:
+                self.clip.on.setValue(False)
 
-            # --- SECTION (slice) ---
-            wires = self.get_slice(plane_type, normal, plane_base)
-            faces = self.make_faces(wires) if wires else []
+            # --- BACKGROUND copies of the sectioned objects ---
+            for t in active:
+                self._vis(t.obj, False)
+                if use_clip:
+                    if t.bg_mode != "clip":
+                        t.bg_feat.Shape = t.shape            # tessellated once
+                        # The clipped solid is open, so back faces become visible;
+                        # one-sided lighting avoids their yellowish tint.
+                        self._set(t.bg_feat.ViewObject, "Lighting", "One side")
+                        t.bg_mode = "clip"
+                elif not quick:
+                    # (while dragging in boolean mode the previous solid is kept)
+                    t.bg_feat.Shape = self.compute_cut_solid(t.shape, plane_type, normal, plane_base, flip)
+                    self._set(t.bg_feat.ViewObject, "Lighting", "Two side")
+                    t.bg_mode = "solid"
+                self._vis(t.bg_feat, True)
+
+            # --- SECTION (slice) of every checked object ---
+            wires, faces, face_colors = [], [], []
+            for t in active:
+                w = self.get_slice(t, plane_type, normal, plane_base)
+                if not w:
+                    continue
+                f = self.make_faces(w)
+                wires += w
+                faces += f
+                shade = tuple(c * 0.75 for c in t.color[:3])
+                face_colors += [shade + (1.0,)] * len(f)
 
             if not wires:
                 self._vis(self.section_feat, False)
@@ -1209,6 +1425,12 @@ class LiveSectionAnalyzer(QDockWidget):
                 # Fill
                 if self.chk_section_fill.isChecked() and faces:
                     self.section_feat.Shape = Part.Compound(faces)
+                    self.section_feat.Placement = pose
+                    vo = self.section_feat.ViewObject
+                    if self.chk_obj_colors.isChecked() and len(faces) == len(face_colors):
+                        vo.DiffuseColor = face_colors
+                    else:
+                        vo.DiffuseColor = [tuple(vo.ShapeColor[:3]) + (1.0,)]
                     self._vis(self.section_feat, True)
                 else:
                     self._vis(self.section_feat, False)
@@ -1216,6 +1438,7 @@ class LiveSectionAnalyzer(QDockWidget):
                 # Edge lines
                 if self.chk_edges.isChecked():
                     self.edge_feat.Shape = Part.Compound(wires)
+                    self.edge_feat.Placement = pose
                     self._vis(self.edge_feat, True)
                 else:
                     self._vis(self.edge_feat, False)
@@ -1225,6 +1448,7 @@ class LiveSectionAnalyzer(QDockWidget):
                     hatch = self.build_hatch(faces, plane_type, center_pos, self.spin_spacing.value())
                     if hatch is not None:
                         self.hatch_feat.Shape = hatch
+                        self.hatch_feat.Placement = pose
                         self._vis(self.hatch_feat, True)
                     else:
                         self._vis(self.hatch_feat, False)
@@ -1237,8 +1461,9 @@ class LiveSectionAnalyzer(QDockWidget):
             App.Console.PrintError(f"Section Error: {str(e)}\n")
 
         # Plain Part::Feature objects need no recompute; just clear the "touched" flag.
-        for feat in (self.bg_feat, self.section_feat, self.edge_feat, self.hatch_feat):
-            feat.purgeTouched()
+        for feat in [self.section_feat, self.edge_feat, self.hatch_feat] + [t.bg_feat for t in active]:
+            if feat is not None:
+                feat.purgeTouched()
 
     # ------------------------------------------------------------------
     # Freeze
@@ -1250,7 +1475,7 @@ class LiveSectionAnalyzer(QDockWidget):
     def freeze_section(self):
         """Freeze current section view using SimpleCopy with folder"""
         doc = App.ActiveDocument
-        if not doc or not self.bg_feat:
+        if not doc or not any(t.checked for t in self.targets):
             return
 
         try:
@@ -1280,24 +1505,30 @@ class LiveSectionAnalyzer(QDockWidget):
 
             copied_objects = []
 
-            # 1. Background: always a real boolean cut here, because the live
-            #    GPU clip does not change the geometry.
-            bg_shape = self.compute_cut_solid(
-                plane_type, normal, plane_base, self.chk_mirror_bg.isChecked()
-            )
-            if bg_shape is not None and not bg_shape.isNull():
-                bg_copy = doc.addObject("Part::Feature", f"Section_Background_{plane_type}")
-                bg_copy.Shape = bg_shape
-                bg_copy.ViewObject.ShapeColor = self.bg_feat.ViewObject.ShapeColor
-                bg_copy.ViewObject.DisplayMode = "Shaded"
-                bg_copy.ViewObject.Transparency = self.spin_trans.value()
-                copied_objects.append(bg_copy)
+            # 1. Background of every sectioned object: always a real boolean cut
+            #    here, because the live GPU clip does not change the geometry.
+            for t in self.targets:
+                if not t.checked:
+                    continue
+                bg_shape = self.compute_cut_solid(
+                    t.shape, plane_type, normal, plane_base, self.chk_mirror_bg.isChecked()
+                )
+                if bg_shape is not None and not bg_shape.isNull():
+                    bg_copy = doc.addObject("Part::Feature", f"Section_Background_{plane_type}")
+                    bg_copy.Label = f"{t.label} ({plane_type})"
+                    bg_copy.Shape = bg_shape
+                    bg_copy.ViewObject.ShapeColor = t.color
+                    bg_copy.ViewObject.DisplayMode = "Shaded"
+                    bg_copy.ViewObject.Transparency = self.spin_trans.value()
+                    copied_objects.append(bg_copy)
 
             # 2. Section fill
             if self.section_feat.ViewObject.Visibility and self._has_shape(self.section_feat):
                 fill_copy = doc.addObject("Part::Feature", f"Section_Fill_{plane_type}")
                 fill_copy.Shape = self.section_feat.Shape
+                fill_copy.Placement = self.section_feat.Placement
                 fill_copy.ViewObject.ShapeColor = self.section_feat.ViewObject.ShapeColor
+                fill_copy.ViewObject.DiffuseColor = self.section_feat.ViewObject.DiffuseColor
                 fill_copy.ViewObject.LineColor = self.section_feat.ViewObject.LineColor
                 fill_copy.ViewObject.LineWidth = self.section_feat.ViewObject.LineWidth
                 fill_copy.ViewObject.DisplayMode = "Shaded"
@@ -1308,6 +1539,7 @@ class LiveSectionAnalyzer(QDockWidget):
             if self.edge_feat.ViewObject.Visibility and self._has_shape(self.edge_feat):
                 edge_copy = doc.addObject("Part::Feature", f"Section_Edges_{plane_type}")
                 edge_copy.Shape = self.edge_feat.Shape
+                edge_copy.Placement = self.edge_feat.Placement
                 edge_copy.ViewObject.LineColor = self.edge_feat.ViewObject.LineColor
                 edge_copy.ViewObject.LineWidth = self.edge_feat.ViewObject.LineWidth
                 edge_copy.ViewObject.DisplayMode = "Wireframe"
@@ -1318,6 +1550,7 @@ class LiveSectionAnalyzer(QDockWidget):
             if self.hatch_feat.ViewObject.Visibility and self._has_shape(self.hatch_feat):
                 hatch_copy = doc.addObject("Part::Feature", f"Section_Hatch_{plane_type}")
                 hatch_copy.Shape = self.hatch_feat.Shape
+                hatch_copy.Placement = self.hatch_feat.Placement
                 hatch_copy.ViewObject.LineColor = self.hatch_feat.ViewObject.LineColor
                 hatch_copy.ViewObject.LineWidth = self.hatch_feat.ViewObject.LineWidth
                 hatch_copy.ViewObject.DisplayMode = "Wireframe"
@@ -1393,16 +1626,14 @@ class LiveSectionAnalyzer(QDockWidget):
             self.clip = None
             self.clip_parent = None
 
-        if self.base_obj:
-            try:
-                self.base_obj.ViewObject.Visibility = True
-            except Exception:
-                pass
+        # Show the original objects again and remove their copies
+        for t in self.targets:
+            self._release(t)
 
         doc = App.ActiveDocument
         if doc:
             # Delete all live features (frozen group is kept)
-            for feat in [self.section_feat, self.edge_feat, self.hatch_feat, self.bg_feat]:
+            for feat in [self.section_feat, self.edge_feat, self.hatch_feat]:
                 if feat is not None:
                     try:
                         if doc.getObject(feat.Name):
