@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased (v0.4-dev)
+- Options now open in FreeCAD's Tasks panel with a standard Close button (falls back to a window if another task dialog is open; `PANEL_MODE` at the top of the macro).
+- Panel is scrollable, with collapsible sections; Freeze Section stays visible at the bottom.
+
 ## 0.3.0
 - Draggable 3D plane gizmo (Qt event filter on the 3D viewport; hover highlight).
 - Mirror Background fixed: it now flips the kept half instead of reflecting the solid, so the object no longer moves.
