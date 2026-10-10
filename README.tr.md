@@ -30,7 +30,7 @@
 
 ## Kullanım
 
-1. Ağaçtan bir veya birkaç katı model seçin.
+1. İsterseniz ağaçtan bir veya birkaç katı model seçin. Seçim yoksa görünen her şey kırpılır.
 2. Makroyu çalıştırın; yan panel açılır.
 3. Düzlemi (XY / XZ / YZ) seçin ve hareket ettirin: 3B görünümdeki turuncu oku sürükleyin veya kaydırıcı / sayı kutusunu kullanın.
 4. Panelden dolgu, kenar, tarama ve saydamlığı ayarlayın.

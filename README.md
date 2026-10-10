@@ -36,7 +36,7 @@
 
 ## Usage
 
-1. Select one or more solids (Part, Body, links, …) in the tree.
+1. Optionally select one or more solids (Part, Body, links, …) in the tree. Without a selection everything visible is clipped.
 2. Run the macro. A dock panel opens.
 3. Choose the plane (XY / XZ / YZ) and move it:
    - drag the orange arrow in the 3D view, or
