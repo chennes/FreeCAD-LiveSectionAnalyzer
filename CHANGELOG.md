@@ -6,6 +6,9 @@
 - Objects the plane does not touch are skipped by a bounding-box test before slicing (~3x faster on a 60-solid demo).
 - Fast drag preview: slow objects are outlined from their tessellation (numpy) while the plane moves; the exact section follows when you let go. `FAST_PREVIEW_MS` sets the threshold. Needs numpy (bundled with FreeCAD); falls back to exact slicing without it.
 - Adaptive update delay: the wait before the next update grows with the duration of the last one (60-250 ms).
+- Mesh-based section (*Section engine (experimental)* checkbox, `MESH_SECTION` for the start state): outline, hatch and fill are built from the tessellation with numpy and drawn as Coin nodes, no OpenCascade slicing. Hatch and fill also follow the plane while dragging; each object gets its own hatch angle and spacing; mesh tolerance is coarse while dragging and fine afterwards. Curves are polygonal at coarse tolerance. Freeze Section still uses exact geometry. Not yet tested inside FreeCAD.
+- Changing a color in the panel now refreshes the mesh section immediately.
+- `tests/test_mesh_core.py`: unit tests of the numpy core (`python3 tests/test_mesh_core.py`).
 
 ## 0.4.0 – 2026-10-10
 - The macro no longer needs a selection: with nothing selected it clips everything visible (scenes of up to 12 solids are sectioned completely, bigger ones start with nothing checked; `AUTO_SECTION_MAX_OBJECTS`).

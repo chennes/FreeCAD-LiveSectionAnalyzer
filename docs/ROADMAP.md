@@ -29,19 +29,35 @@ exact slice ~830 ms, mesh outline ~0.5 ms (length differs by 0.06 %); a full dra
 - Real-assembly timings (2 solids): exact slice 200-540 ms, up to ~2.5 s where the plane cuts the
   gear teeth; hatch 12-35 ms, fill/edges a few ms. Slicing with OpenCascade is the only real cost.
 
-## Next: mesh-based section pipeline (flag `MESH_SECTION`, idea stage)
+## Mesh-based section pipeline (checkbox *Section engine*, flag `MESH_SECTION`)
 
-Build contour, hatch and fill from the tessellation instead of OpenCascade, keep the old path
-for comparison and for *Freeze*:
+Implemented on this branch; **not yet run inside FreeCAD** (see "Verified" below). Contour, hatch and
+fill are built from the tessellation instead of OpenCascade and drawn as Coin nodes. The old path stays
+for comparison (untick the checkbox) and is always used by *Freeze*.
 
-1. Contour: chain the plane/triangle segments into closed loops (key the cut points by mesh edge id).
-2. Hatch: scanline clipping of the hatch lines against the loops (even-odd rule, holes for free),
-   drawn as Coin line nodes; per-object angle/spacing so neighbouring parts hatch differently.
-3. Fill: Coin polygons from the loops (holes need a small triangulation, e.g. keyhole bridging).
-4. Exact geometry only for *Freeze*; mesh tolerance configurable, finer mesh after a drag ends.
+1. ✅ Contour: the tessellation is welded (vertices clustered by gaps along x/y/z, per solid), the
+   plane/triangle segments are keyed by mesh edge id and chained into closed loops. Open chains whose
+   ends meet within 1e-4 of the object's diagonal are joined (cracks).
+2. ✅ Hatch: scanline clipping of the lines against the loops (even-odd rule, holes for free), numpy only.
+   Lines are anchored at the origin, so the pattern does not swim while the plane moves.
+   `MESH_HATCH_STYLES` gives each object its own angle and spacing factor.
+3. ✅ Fill: nesting depth of the loops (outer / hole / island), holes joined to the outer loop by keyhole
+   bridging, drawn as concave Coin polygons (`SoShapeHints` unknown face type).
+4. ✅ Exact geometry only for *Freeze*. `MESH_TOL_REL` (coarse, while dragging) and `MESH_TOL_FINE_REL`
+   (after the drag) set the mesh tolerance; hatch and fill are also drawn while dragging
+   (`MESH_DRAG_HATCH`).
+
 Trade-off: curves look polygonal at coarse tolerance.
 
-Also open: incremental exact updates (item 4), hatch/fill during drag.
+Verified (`python3 tests/test_mesh_core.py`, synthetic meshes, outside FreeCAD): welding, loop chaining
+(box, tube, torus, star-shaped gear, plane through vertices, cracks), loop nesting, keyhole bridging
+(no self-crossings, area preserved), hatch length = area / spacing at any angle. On a 190 000-triangle
+test mesh: weld 46 ms (once per mesh), loops 9 ms, hatch a few ms.
+
+Still to check in FreeCAD: that Coin tessellates the bridged polygons correctly, the pivy field calls,
+timings on real assemblies, and how the mesh section compares with the exact one on curved parts.
+
+Also open: incremental exact updates (item 4 above).
 
 ## Ideas after that
 

@@ -23,6 +23,17 @@ The panel lists every visible solid of the document as a `_Target` (object + sha
 5. While dragging, a quick mode skips hatch and boolean work; the full result is built on release.
 6. Features are marked with `purgeTouched()` instead of a full recompute; view properties are written only when changed.
 
+## Mesh section (v0.5-experimental)
+
+With *Section engine -> Mesh-based section* on (`MESH_SECTION` sets the start state), step 3 and 4 above are replaced by `_update_mesh_section()`:
+
+1. `_mesh_for()` tessellates the object once per level (coarse / fine, `MESH_TOL_REL`, `MESH_TOL_FINE_REL`) and welds the vertices (`mesh_weld`).
+2. `mesh_section_loops()` chains the plane/triangle segments into loops (cached per object, level and plane).
+3. `fill_polygons()` (nesting + keyhole bridging) and `hatch_segments()` (even-odd scanlines, per-object angle) work on the loops in plane coordinates.
+4. The result goes into Coin nodes (`_create_mesh_nodes()`: fill, outline, hatch) that sit before the clip plane, like the drag preview. The exact features are hidden while this runs.
+
+The numpy functions between `BEGIN MESH CORE` and `END MESH CORE` do not touch FreeCAD; `tests/test_mesh_core.py` cuts that block out of the macro and tests it on its own. `freeze_section()` calls `update_section(force_exact=True)` so frozen copies are real geometry, then returns to the live view.
+
 ## Mirror
 
 Mirror flips which side of the plane is kept (`flip` in `set_clip` / `compute_cut_solid`). The shape is never reflected.
@@ -33,4 +44,4 @@ Mirror flips which side of the plane is kept (`flip` in `set_clip` / `compute_cu
 
 ## Tunables
 
-`PANEL_MODE`, `CLIP_KEEP_NEGATIVE`, `GIZMO_PICK_PLANE`, `AUTO_SECTION_MAX_OBJECTS`, `MAX_HATCH_LINES`, `SLICE_CACHE_SIZE`, `OVERLAY_OFFSET_REL` at the top of the file.
+`PANEL_MODE`, `CLIP_KEEP_NEGATIVE`, `GIZMO_PICK_PLANE`, `AUTO_SECTION_MAX_OBJECTS`, `MAX_HATCH_LINES`, `SLICE_CACHE_SIZE`, `OVERLAY_OFFSET_REL`, `DEBUG_TIMING`, `FAST_PREVIEW_MS`, `MESH_SECTION`, `MESH_TOL_REL`, `MESH_TOL_FINE_REL`, `MESH_DRAG_HATCH`, `MESH_HATCH_STYLES`, `MESH_CACHE_SIZE` at the top of the file.
