@@ -25,7 +25,7 @@ The panel lists every visible solid of the document as a `_Target` (object + sha
 
 ## Mesh section (v0.5-experimental)
 
-With *Section engine -> Mesh-based section* on (`MESH_SECTION` sets the start state), step 3 and 4 above are replaced by `_update_mesh_section()`:
+With *Section Plane -> Mesh-based section* on (`MESH_SECTION` sets the start state), step 3 and 4 above are replaced by `_update_mesh_section()`:
 
 1. `_mesh_for()` tessellates the object once per level (coarse / fine, `MESH_TOL_REL`, `MESH_TOL_FINE_REL`) and welds the vertices (`mesh_weld`).
 2. `mesh_section_loops()` chains the plane/triangle segments into loops (cached per object, level and plane).

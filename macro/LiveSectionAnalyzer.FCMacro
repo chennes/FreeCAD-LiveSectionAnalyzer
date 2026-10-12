@@ -87,7 +87,7 @@ OVERLAY_OFFSET_REL = 1e-4
 # OpenCascade. This is only the start state of the "Mesh-based section" checkbox in the
 # panel; the exact path stays available for comparison and is always used by Freeze.
 # Curves look polygonal at a coarse tolerance.
-MESH_SECTION = False
+MESH_SECTION = True
 
 # Tessellation tolerance as a fraction of the object's bounding-box diagonal: coarse while
 # the plane is being dragged, fine once it rests.
@@ -1366,6 +1366,18 @@ class LiveSectionAnalyzer(QDockWidget):
         self.chk_gizmo.stateChanged.connect(self.on_gizmo_toggled)
         layout.addWidget(self.chk_gizmo)
 
+        # Section engine (part of the Section Plane group)
+        mesh_ok = HAS_NP and self.mesh_switch is not None
+        self.chk_mesh = QCheckBox("Mesh-based section (fast, curves are polygonal)")
+        self.chk_mesh.setChecked(bool(MESH_SECTION) and mesh_ok)
+        self.chk_mesh.setEnabled(mesh_ok)
+        self.chk_mesh.setToolTip(
+            "Builds outline, hatch and fill from the tessellation instead of OpenCascade: "
+            "much faster on big or curved parts. Each object gets its own hatch angle and "
+            "spacing. Freeze Section always uses exact geometry."
+        )
+        layout.addWidget(self.chk_mesh)
+
         # --- OFFSET ---
         layout = section("Offset (Position)")
 
@@ -1521,20 +1533,6 @@ class LiveSectionAnalyzer(QDockWidget):
         hatch_point_layout.addWidget(self.hatch_point_spin)
         hatch_point_layout.addStretch()
         layout.addLayout(hatch_point_layout)
-
-        # --- SECTION ENGINE (experimental) ---
-        layout = section("Section engine (experimental)", expanded=False)
-
-        mesh_ok = HAS_NP and self.mesh_switch is not None
-        self.chk_mesh = QCheckBox("Mesh-based section (fast, curves are polygonal)")
-        self.chk_mesh.setChecked(bool(MESH_SECTION) and mesh_ok)
-        self.chk_mesh.setEnabled(mesh_ok)
-        self.chk_mesh.setToolTip(
-            "Builds outline, hatch and fill from the tessellation instead of OpenCascade: "
-            "much faster on big or curved parts. Each object gets its own hatch angle and "
-            "spacing. Freeze Section always uses exact geometry."
-        )
-        layout.addWidget(self.chk_mesh)
 
         # --- FREEZE BUTTON ---
         self.btn_freeze = QPushButton("❄️ Freeze Section (Simple Copy with Folder)")

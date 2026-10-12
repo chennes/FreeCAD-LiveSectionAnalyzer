@@ -31,7 +31,7 @@ exact slice ~830 ms, mesh outline ~0.5 ms (length differs by 0.06 %); a full dra
 
 ## Mesh-based section pipeline (checkbox *Section engine*, flag `MESH_SECTION`)
 
-Implemented on this branch; **not yet run inside FreeCAD** (see "Verified" below). Contour, hatch and
+Implemented and tested in FreeCAD 1.1.4 by the author (17-object pump assembly: drag updates 6-15 ms, release ~100 ms once meshes are cached; the first tessellation of a big assembly takes ~3 s). Contour, hatch and
 fill are built from the tessellation instead of OpenCascade and drawn as Coin nodes. The old path stays
 for comparison (untick the checkbox) and is always used by *Freeze*.
 
@@ -54,8 +54,7 @@ Verified (`python3 tests/test_mesh_core.py`, synthetic meshes, outside FreeCAD):
 (no self-crossings, area preserved), hatch length = area / spacing at any angle. On a 190 000-triangle
 test mesh: weld 46 ms (once per mesh), loops 9 ms, hatch a few ms.
 
-Still to check in FreeCAD: that Coin tessellates the bridged polygons correctly, the pivy field calls,
-timings on real assemblies, and how the mesh section compares with the exact one on curved parts.
+Checked in FreeCAD: Coin draws the bridged polygons, pivy calls work, timings on real assemblies. Safety limits (`MESH_FINE_MAX_TRIS`, `MESH_FINE_BUDGET_S`, ...) keep heavy parts from freezing the first update.
 
 Also open: incremental exact updates (item 4 above).
 
