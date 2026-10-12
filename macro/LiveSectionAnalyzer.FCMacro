@@ -106,7 +106,9 @@ HATCH_STYLES = ((45.0, 1.0), (135.0, 1.0), (0.0, 1.5), (90.0, 1.5))
 # Max cached mesh sections (all objects together).
 MESH_CACHE_SIZE = 128
 # Safety limits (the first tick of "Mesh-based section" tessellates every checked object)
-MESH_FINE_MAX_TRIS = 40000      # fine mesh only when the coarse one has at most this many triangles
+MESH_FINE_MAX_TRIS = 8000       # fine mesh only when the coarse one has at most this many triangles
+MESH_TOL_MIN = 0.01             # mm, tessellation tolerance never goes below this (threads!)
+MESH_FINE_PREDICT = 25.0        # fine mesh costs ~this times the coarse one; skipped if it would exceed the budget
 MESH_MAX_FILL_POINTS = 40000    # no fill polygons for sections with more loop points than this
 MESH_FINE_BUDGET_S = 1.5        # per update: no further fine tessellations after this much time
 
@@ -2011,12 +2013,14 @@ class LiveSectionAnalyzer(QDockWidget):
         if m is None and fine:
             coarse = self._mesh_for(t, False)
             if (len(coarse[1]) > MESH_FINE_MAX_TRIS
+                    or getattr(t, "mesh_s", 0.0) * MESH_FINE_PREDICT > MESH_FINE_BUDGET_S
                     or time.perf_counter() - self._mesh_t0 > MESH_FINE_BUDGET_S):
                 t.meshes[1] = coarse                  # heavy part / out of time: keep the coarse mesh
                 return coarse
         if m is None:
             diag = max(t.bbox.DiagonalLength, 1e-9)
-            tol = max(diag * (MESH_TOL_FINE_REL if fine else MESH_TOL_REL), 1e-5)
+            tol = max(diag * (MESH_TOL_FINE_REL if fine else MESH_TOL_REL), MESH_TOL_MIN)
+            t_tess = time.perf_counter()
             Vs, Ts, Ss, off = [], [], [], 0
             for i, solid in enumerate(t.shape.Solids or [t.shape]):
                 verts, tris = solid.tessellate(tol)
@@ -2032,6 +2036,8 @@ class LiveSectionAnalyzer(QDockWidget):
                 V, T = np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int64)
             m = (V, T, diag * 1e-4)
             t.meshes[lvl] = m
+            if not fine:
+                t.mesh_s = time.perf_counter() - t_tess        # cost of the coarse mesh, predicts the fine one
         return m
 
     def _mesh_loops(self, t, fine, normal, d):
