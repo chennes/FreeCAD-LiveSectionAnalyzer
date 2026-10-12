@@ -10,7 +10,7 @@
 
 - XY, XZ veya YZ düzleminde **canlı kesit**; kaydırıcı, sayı kutusu veya **3B görünümde gizmo sürükleyerek** hareket.
 - **Birden fazla obje ve montaj** – kesit alınacak parçaları listeden seçin; düzlem ekranda gördüğünüz her şeyi kırpar, böylece parçalar arası boşlukları kontrol edebilirsiniz. App::Part ve link içindeki parçalar montaj konumunu korur.
-- **FreeCAD'in Tasks panelinde seçenekler** – kaydırılabilir, açılır bölümler, standart Close düğmesi (`PANEL_MODE` ile yüzen pencere de seçilebilir).
+- **Seçenekler kendi dock penceresinde** – kaydırılabilir, açılır bölümler; istediğin yere sürükleyebilir veya yüzdürebilirsin. Tasks paneli ölçü alma gibi işler için boş kalır (`PANEL_MODE = "task"` seçenekleri yine Tasks paneline koyar).
 - **Hızlı GPU kırpma** (Coin3D `SoClipPlane`) – her harekette boolean kesme yapılmaz; karmaşık parçalarda bile akıcıdır.
 - Gerçek kesitten (`Shape.slice`) üretilen **kesit konturu, dolgu ve tarama**; renk, çizgi kalınlığı, tarama aralığı ve nokta boyutu ayarlanabilir.
 - **Mirror Background** – parçanın karşı yarısını gösterir. Sadece kesme düzlemi değişir; obje hareket etmez.
@@ -34,7 +34,7 @@ Gelecek planlar için: [docs/ROADMAP.md](docs/ROADMAP.md)
 ## Kullanım
 
 1. İsterseniz ağaçtan bir veya birkaç katı model seçin. Seçim yoksa görünen her şey kırpılır.
-2. Makroyu çalıştırın; yan panel açılır.
+2. Makroyu çalıştırın; seçenekler sağ tarafta kendi dock penceresinde açılır.
 3. Düzlemi (XY / XZ / YZ) seçin ve hareket ettirin: 3B görünümdeki turuncu oku sürükleyin veya kaydırıcı / sayı kutusunu kullanın.
 4. Panelden dolgu, kenar, tarama ve saydamlığı ayarlayın.
 5. Sonucu saklamak için **Freeze Section**, geçici nesneleri kaldırmak için **Close Analysis**.

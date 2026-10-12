@@ -43,10 +43,15 @@ except Exception:
     HAS_COIN = False
 
 # Where the options panel lives:
-#   "task" -> FreeCAD's Tasks panel (Combo View), with scrolling and a Close button
-#   "dock" -> floating/dockable window
+#   "dock" -> its own dockable / floating window (the Tasks panel stays free, so measuring
+#             and other task dialogs work while the section is open)
+#   "task" -> FreeCAD's Tasks panel (Combo View)
 # "task" falls back to "dock" automatically when another task dialog is open.
-PANEL_MODE = "task"
+PANEL_MODE = "dock"
+
+# Side of the main window the dock opens on ("left" or "right"); drag it anywhere afterwards,
+# or float it by double-clicking its title.
+DOCK_AREA = "right"
 
 # If the wrong half of the object is clipped away, flip this value.
 CLIP_KEEP_NEGATIVE = True
@@ -1480,8 +1485,11 @@ class LiveSectionAnalyzer(QDockWidget):
                 App.Console.PrintWarning(f"Tasks panel unavailable ({e}), using a window.\n")
         self.btn_close.setVisible(True)
         self._mode = "dock"
+        self.setObjectName("LiveSectionAnalyzerDock")
+        self.panel.setMinimumWidth(300)
         self.setWidget(self.panel)
-        Gui.getMainWindow().addDockWidget(Qt.LeftDockWidgetArea, self)
+        area = Qt.LeftDockWidgetArea if str(DOCK_AREA).lower() == "left" else Qt.RightDockWidgetArea
+        Gui.getMainWindow().addDockWidget(area, self)
         self.show()
 
     # ------------------------------------------------------------------

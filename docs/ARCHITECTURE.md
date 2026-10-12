@@ -4,7 +4,7 @@ Everything lives in `macro/LiveSectionAnalyzer.FCMacro`.
 
 ## Classes
 
-- **`LiveSectionAnalyzer(QDockWidget)`** – the update logic and the panel contents. Creates temporary document features, wires the UI and owns the gizmo. The options widget is shown in the Tasks panel (`SectionTaskPanel`) or, as a fallback, in this dock window (`PANEL_MODE`).
+- **`LiveSectionAnalyzer(QDockWidget)`** – the update logic and the panel contents. Creates temporary document features, wires the UI and owns the gizmo. The options widget is shown in this dock window (default, `PANEL_MODE = "dock"`, side set by `DOCK_AREA`) or in the Tasks panel (`PANEL_MODE = "task"`, `SectionTaskPanel`), which also falls back to the dock when another task dialog is open.
 - **`SectionTaskPanel`** / **`_Collapsible`** – adapter for FreeCAD's task dialog protocol (standard Close button) and a small foldable section widget.
 - **`_Target`** – one listed object: the object, its shape in global coordinates, its color and its background copy.
 - **`PlaneGizmo`** – Coin3D scene nodes (plane outline + arrow) with hit-testing in screen space and a drag computed from the closest point between the mouse ray and the plane-normal axis. Rendered under `SoFCUnifiedSelection` (on some builds nodes appended to the returned scene graph are not drawn) with a `SoAnnotation` root so it shows on top of transparent geometry.
@@ -44,4 +44,4 @@ Mirror flips which side of the plane is kept (`flip` in `set_clip` / `compute_cu
 
 ## Tunables
 
-`PANEL_MODE`, `CLIP_KEEP_NEGATIVE`, `GIZMO_PICK_PLANE`, `AUTO_SECTION_MAX_OBJECTS`, `MAX_HATCH_LINES`, `SLICE_CACHE_SIZE`, `OVERLAY_OFFSET_REL`, `DEBUG_TIMING`, `FAST_PREVIEW_MS`, `MESH_SECTION`, `MESH_TOL_REL`, `MESH_TOL_FINE_REL`, `MESH_DRAG_HATCH`, `HATCH_STYLES`, `MESH_CACHE_SIZE` at the top of the file.
+`PANEL_MODE`, `DOCK_AREA`, `CLIP_KEEP_NEGATIVE`, `GIZMO_PICK_PLANE`, `AUTO_SECTION_MAX_OBJECTS`, `MAX_HATCH_LINES`, `SLICE_CACHE_SIZE`, `OVERLAY_OFFSET_REL`, `DEBUG_TIMING`, `FAST_PREVIEW_MS`, `MESH_SECTION`, `MESH_TOL_REL`, `MESH_TOL_FINE_REL`, `MESH_DRAG_HATCH`, `HATCH_STYLES`, `MESH_CACHE_SIZE` at the top of the file.
