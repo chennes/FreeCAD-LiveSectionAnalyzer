@@ -27,6 +27,7 @@ mesh_section_loops = NS["mesh_section_loops"]
 loop_nesting = NS["loop_nesting"]
 fill_polygons = NS["fill_polygons"]
 hatch_segments = NS["hatch_segments"]
+fill_trapezoids = NS["fill_trapezoids"]
 _signed_area = NS["_signed_area"]
 _point_in_loop = NS["_point_in_loop"]
 _join_chains = NS["_join_chains"]
@@ -356,6 +357,55 @@ class SpeedTests(unittest.TestCase):
             len(T2), (t1 - t0) * 1e3, (t2 - t1) * 1e3, len(closed), (t3 - t2) * 1e3, (t4 - t3) * 1e3, len(segs)))
         self.assertGreater(len(closed), 0)
         self.assertLess(t2 - t1, 1.0)
+
+
+
+class TrapezoidFillTests(unittest.TestCase):
+    @staticmethod
+    def quad_area(q):
+        return sum(abs(_signed_area(x)) for x in q)
+
+    def test_plate_with_holes_and_island_area(self):
+        outer = np.array([[0, 0], [100, 0], [100, 60], [0, 60.0]])
+        holes = [circle(15 + 14 * i, 15, 4) for i in range(6)] + [circle(15 + 14 * i, 45, 4) for i in range(6)]
+        big, island = circle(50, 30, 9, 32), circle(50, 30, 3, 16)
+        loops = [outer] + holes + [big, island]
+        want = (abs(_signed_area(outer)) - sum(abs(_signed_area(h)) for h in holes + [big])
+                + abs(_signed_area(island)))
+        q = fill_trapezoids(loops)
+        self.assertAlmostEqual(self.quad_area(q), want, places=6)
+
+    def test_concave_u_shape_and_rotation(self):
+        outer = np.array([[0, 0], [30, 0], [30, 30], [20, 30], [20, 10], [10, 10], [10, 30], [0, 30.0]])
+        hole = circle(25, 20, 3, 12)[::-1]
+        want = abs(_signed_area(outer)) - abs(_signed_area(hole))
+        for ang in (0.0, 0.3, 1.1, 2.5):
+            c, s_ = np.cos(ang), np.sin(ang)
+            R = np.array([[c, -s_], [s_, c]])
+            q = fill_trapezoids([outer @ R, hole @ R])
+            self.assertAlmostEqual(self.quad_area(q), want, places=6)
+
+    def test_star_gear_with_bore(self):
+        n = 120
+        th = np.linspace(0, 2 * np.pi, 2 * n, endpoint=False)
+        r = np.where(np.arange(2 * n) % 2 == 0, 20.0, 17.0)
+        gear = np.stack((r * np.cos(th), r * np.sin(th)), axis=1)
+        bore = circle(0, 0, 6, 24)
+        want = abs(_signed_area(gear)) - abs(_signed_area(bore))
+        q = fill_trapezoids([gear, bore])
+        self.assertAlmostEqual(self.quad_area(q), want, places=5)
+        self.assertTrue(np.all(q[:, 2, 1] >= q[:, 0, 1]))
+
+    def test_empty(self):
+        self.assertEqual(fill_trapezoids([]).shape, (0, 4, 2))
+
+    def test_speed_on_a_big_section(self):
+        import time
+        loops = [circle(0, 0, 100, 1500)] + [circle(40 * np.cos(a), 40 * np.sin(a), 5, 200)
+                                              for a in np.linspace(0, 6.28, 6, endpoint=False)]
+        t0 = time.perf_counter()
+        fill_trapezoids(loops)
+        self.assertLess(time.perf_counter() - t0, 1.5)
 
 
 if __name__ == "__main__":

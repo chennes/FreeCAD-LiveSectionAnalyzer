@@ -115,6 +115,7 @@ MESH_FINE_BUDGET_S = 1.5        # per update: no further fine tessellations afte
 # Mesh section core: pure numpy, no FreeCAD (tests/test_mesh_core.py runs it alone)
 # ----------------------------------------------------------------------
 # BEGIN MESH CORE
+MESH_MAX_QUAD_POINTS = 8000     # finished view: convex-quad fill up to this many loop points
 MESH_MAX_HOLES = 400            # more holes per outer loop: no keyhole bridging (fill skipped)
 def mesh_weld(V, T, sid, tol):
     """Merge coincident vertices of a tessellation.
@@ -367,6 +368,49 @@ def fill_polygons(loops):
             continue                                  # too many holes to bridge quickly
         out.append(_bridge_holes(outer, hs) if hs else outer)
     return out
+
+
+def fill_trapezoids(loops):
+    """Even-odd fill of 2D closed loops as convex quads, (m, 4, 2).
+
+    Horizontal slabs between consecutive vertex heights; inside a slab the edges cut it into
+    trapezoids (pairs of neighbouring edges). Convex pieces need no polygon tessellator, so
+    sections with many holes cannot tear.
+    """
+    P = [np.asarray(L, dtype=float) for L in loops if len(L) >= 3]
+    if not P:
+        return np.zeros((0, 4, 2))
+    A = np.concatenate(P)
+    B = np.concatenate([np.roll(L, -1, axis=0) for L in P])
+    flip = A[:, 1] > B[:, 1]
+    lo = np.where(flip[:, None], B, A)
+    hi = np.where(flip[:, None], A, B)
+    keep = hi[:, 1] > lo[:, 1]
+    lo, hi = lo[keep], hi[keep]
+    if not len(lo):
+        return np.zeros((0, 4, 2))
+    x0, y0, x1, y1 = lo[:, 0], lo[:, 1], hi[:, 0], hi[:, 1]
+    slope = (x1 - x0) / (y1 - y0)
+    ys = np.unique(np.concatenate((y0, y1)))
+    out = []
+    for k in range(len(ys) - 1):
+        a, b = ys[k], ys[k + 1]
+        act = np.flatnonzero((y0 <= a) & (y1 >= b))
+        if len(act) < 2:
+            continue
+        xa = x0[act] + (a - y0[act]) * slope[act]
+        xb = x0[act] + (b - y0[act]) * slope[act]
+        o = np.argsort(xa + xb, kind="stable")
+        xa, xb = xa[o], xb[o]
+        m = len(xa) // 2 * 2
+        la, ra, lb, rb = xa[0:m:2], xa[1:m:2], xb[0:m:2], xb[1:m:2]
+        q = np.empty((len(la), 4, 2))
+        q[:, 0, 0], q[:, 0, 1] = la, a
+        q[:, 1, 0], q[:, 1, 1] = ra, a
+        q[:, 2, 0], q[:, 2, 1] = rb, b
+        q[:, 3, 0], q[:, 3, 1] = lb, b
+        out.append(q)
+    return np.concatenate(out) if out else np.zeros((0, 4, 2))
 
 
 def hatch_segments(loops, angle_deg, spacing, max_lines=1500):
@@ -2002,49 +2046,15 @@ class LiveSectionAnalyzer(QDockWidget):
             self._loop_cache[key] = hit
         return hit
 
-    def _fill_triangles(self, t, key, loops):
-        """Triangles ((m, 3, 2) array) of the section fill, built by OpenCascade (cached).
-
-        Coin's own polygon tessellator can tear on bridged polygons with many holes, so the
-        finished (non-drag) view triangulates each outer loop with its holes as a planar face.
-        Returns None when that fails; the caller then falls back to Coin polygons.
-        """
-        if key in self._tri_cache:
-            return self._tri_cache[key]
-        tris = None
-        try:
-            depth, parent = loop_nesting(loops)
-            holes_of = {}
-            for i, dp in enumerate(depth):
-                if dp & 1:
-                    holes_of.setdefault(parent[i], []).append(i)
-
-            def wire(L):
-                keep = np.ones(len(L), dtype=bool)
-                keep[1:] = (np.abs(np.diff(L, axis=0)).max(axis=1) > 1e-9)   # no repeated points
-                pts = [App.Vector(float(x), float(y), 0.0) for x, y in L[keep]]
-                pts.append(pts[0])
-                return Part.makePolygon(pts)
-
-            out = []
-            for i, L in enumerate(loops):
-                if depth[i] & 1:
-                    continue
-                wires = [wire(L)] + [wire(loops[h]) for h in holes_of.get(i, [])]
-                face = Part.makeFace(wires, "Part::FaceMakerBullseye")
-                for f in face.Faces:
-                    verts, idx = f.tessellate(max(float(np.ptp(L, axis=0).max()), 1e-6))
-                    if not idx:
-                        raise ValueError("empty triangulation")
-                    P = np.array([(v.x, v.y) for v in verts])
-                    out.append(P[np.array(idx, dtype=np.int64)])
-            tris = np.concatenate(out) if out else None
-        except Exception as e:
-            App.Console.PrintWarning(f"Section fill triangulation failed ({e}); using polygons\n")
-        if len(self._tri_cache) >= MESH_CACHE_SIZE:
-            self._tri_cache.pop(next(iter(self._tri_cache)))
-        self._tri_cache[key] = tris
-        return tris
+    def _fill_quads(self, key, loops):
+        """Convex quads of the section fill (cached); see fill_trapezoids()."""
+        quads = self._tri_cache.get(key)
+        if quads is None:
+            quads = fill_trapezoids(loops)
+            if len(self._tri_cache) >= MESH_CACHE_SIZE:
+                self._tri_cache.pop(next(iter(self._tri_cache)))
+            self._tri_cache[key] = quads
+        return quads
 
     def _hatch_style(self, t):
         """(angle, spacing factor) of an object; stable for the whole session."""
@@ -2134,14 +2144,11 @@ class LiveSectionAnalyzer(QDockWidget):
                 npts = sum(len(L) for L in loops)
                 polys = []
                 if npts <= MESH_MAX_FILL_POINTS:
-                    tris = None
-                    if fine:
+                    if fine and npts <= MESH_MAX_QUAD_POINTS:
                         tkey = (t.key, round(normal.x, 6), round(normal.y, 6), round(normal.z, 6), round(d, 4))
-                        tris = self._fill_triangles(t, tkey, loops)
-                    if tris is not None:
-                        polys = list(tris)                      # many 3-vertex polygons
+                        polys = list(self._fill_quads(tkey, loops))      # convex quads: no tearing
                     else:
-                        polys = fill_polygons(loops)
+                        polys = fill_polygons(loops)                     # drag / huge sections
                 shade = tuple(c * 0.75 for c in t.color[:3]) if obj_colors else flat
                 for p in polys:
                     fill.append(to3(p))
