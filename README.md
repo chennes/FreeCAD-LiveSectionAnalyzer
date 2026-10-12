@@ -1,8 +1,23 @@
 <p align="center"><img src="docs/logo.png" alt="FreeCAD Clipping Macro" width="220"></p>
 
-# FreeCAD LiveSectionAnalyzer
+# Addon - Addition: LiveSectionAnalyzer
 
-**Interactive, real-time section views for FreeCAD** – clip a solid with a plane, drag the plane with a 3D gizmo, and get a hatched cross-section that updates as you move.
+Description:
+
+LiveSectionAnalyzer is a FreeCAD macro for interactive, real-time section views. A clipping plane (XY/XZ/YZ) is moved with a slider, a spin box or a 3D gizmo; the section is shown with fill, outline and hatch, and updates while you drag.
+
+Works on multiple objects and assemblies (App::Part containers and links keep their placement)
+Fast GPU clipping (Coin3D SoClipPlane) plus a mesh-based section engine (outline/hatch/fill from the tessellation), ~10–30 ms per update on a 17-part assembly
+Per-object hatch direction, adjustable colors, line widths, hatch spacing
+Own dock window, so the Tasks panel stays free for the Measure tool
+Freeze Section stores the view as real, independent FreeCAD objects
+
+Repository: https://github.com/sedatkrn/FreeCAD-LiveSectionAnalyzer
+Latest release: v0.5.0
+License: MIT
+Tested with FreeCAD 1.1.x and 27.1 dev on Linux; announced and tested by users on the FreeCAD forum.
+The repository has a package.xml, a LICENSE file, README (EN/TR), CHANGELOG and unit tests for the numeric core.
+I will maintain the addon.
 
 [Türkçe](README.tr.md)
 
