@@ -2,6 +2,8 @@
 
 ## 0.5.0 – 2026-10-12
 
+- Section fill of the finished (non-drag) mesh view is triangulated by OpenCascade (cached) instead of Coin's polygon tessellator, which could tear on sections with many holes; falls back to polygons on error.
+- Background transparency now defaults to 0 (faster, clearer); wait cursor during full updates and a progress dialog while *Freeze Section* runs.
 - Mesh section safety limits (`MESH_FINE_MAX_TRIS`, `MESH_FINE_BUDGET_S`, `MESH_MAX_FILL_POINTS`, `MESH_MAX_HOLES`): heavy parts (threads, large bodies) keep the coarse mesh instead of a fine tessellation, huge sections skip the fill, keyhole search is bounded. Fixes FreeCAD freezing when the option was ticked on a big assembly.
 - `DEBUG_TIMING`: per-update timings (background / slice / faces / fill / edges / hatch) in the Report view.
 - Objects the plane does not touch are skipped by a bounding-box test before slicing (~3x faster on a 60-solid demo).

@@ -21,7 +21,7 @@ from PySide.QtWidgets import (
     QColorDialog, QDockWidget, QDoubleSpinBox, QMessageBox, QLabel, QCheckBox,
     QRadioButton, QPushButton, QSlider, QSpinBox, QWidget,
     QHBoxLayout, QVBoxLayout, QScrollArea, QToolButton, QFrame,
-    QDialogButtonBox, QSizePolicy, QListWidget, QListWidgetItem,
+    QDialogButtonBox, QSizePolicy, QListWidget, QListWidgetItem, QApplication, QProgressDialog,
 )
 
 from PySide.QtGui import QIcon, QPixmap, QColor
@@ -981,6 +981,7 @@ class LiveSectionAnalyzer(QDockWidget):
         self._gizmo_start_offset = 0.0
         self._slice_cache = {}
         self._loop_cache = {}         # mesh section loops per (object, mesh level, plane)
+        self._tri_cache = {}          # OpenCascade triangulation of the section fill (same keys)
         self._hatch_idx = {}          # object key -> index into HATCH_STYLES
         self.init_done = False
 
@@ -1415,7 +1416,7 @@ class LiveSectionAnalyzer(QDockWidget):
         trans_layout.addWidget(QLabel("Transparency (%):"))
         self.spin_trans = QSpinBox()
         self.spin_trans.setRange(0, 100)
-        self.spin_trans.setValue(70)
+        self.spin_trans.setValue(0)
         trans_layout.addWidget(self.spin_trans)
         trans_layout.addStretch()
         layout.addLayout(trans_layout)
@@ -2001,6 +2002,50 @@ class LiveSectionAnalyzer(QDockWidget):
             self._loop_cache[key] = hit
         return hit
 
+    def _fill_triangles(self, t, key, loops):
+        """Triangles ((m, 3, 2) array) of the section fill, built by OpenCascade (cached).
+
+        Coin's own polygon tessellator can tear on bridged polygons with many holes, so the
+        finished (non-drag) view triangulates each outer loop with its holes as a planar face.
+        Returns None when that fails; the caller then falls back to Coin polygons.
+        """
+        if key in self._tri_cache:
+            return self._tri_cache[key]
+        tris = None
+        try:
+            depth, parent = loop_nesting(loops)
+            holes_of = {}
+            for i, dp in enumerate(depth):
+                if dp & 1:
+                    holes_of.setdefault(parent[i], []).append(i)
+
+            def wire(L):
+                keep = np.ones(len(L), dtype=bool)
+                keep[1:] = (np.abs(np.diff(L, axis=0)).max(axis=1) > 1e-9)   # no repeated points
+                pts = [App.Vector(float(x), float(y), 0.0) for x, y in L[keep]]
+                pts.append(pts[0])
+                return Part.makePolygon(pts)
+
+            out = []
+            for i, L in enumerate(loops):
+                if depth[i] & 1:
+                    continue
+                wires = [wire(L)] + [wire(loops[h]) for h in holes_of.get(i, [])]
+                face = Part.makeFace(wires, "Part::FaceMakerBullseye")
+                for f in face.Faces:
+                    verts, idx = f.tessellate(max(float(np.ptp(L, axis=0).max()), 1e-6))
+                    if not idx:
+                        raise ValueError("empty triangulation")
+                    P = np.array([(v.x, v.y) for v in verts])
+                    out.append(P[np.array(idx, dtype=np.int64)])
+            tris = np.concatenate(out) if out else None
+        except Exception as e:
+            App.Console.PrintWarning(f"Section fill triangulation failed ({e}); using polygons\n")
+        if len(self._tri_cache) >= MESH_CACHE_SIZE:
+            self._tri_cache.pop(next(iter(self._tri_cache)))
+        self._tri_cache[key] = tris
+        return tris
+
     def _hatch_style(self, t):
         """(angle, spacing factor) of an object; stable for the whole session."""
         idx = self._hatch_idx.get(t.key)
@@ -2087,7 +2132,16 @@ class LiveSectionAnalyzer(QDockWidget):
             if want_fill and loops:
                 t0 = perf()
                 npts = sum(len(L) for L in loops)
-                polys = fill_polygons(loops) if npts <= MESH_MAX_FILL_POINTS else []
+                polys = []
+                if npts <= MESH_MAX_FILL_POINTS:
+                    tris = None
+                    if fine:
+                        tkey = (t.key, round(normal.x, 6), round(normal.y, 6), round(normal.z, 6), round(d, 4))
+                        tris = self._fill_triangles(t, tkey, loops)
+                    if tris is not None:
+                        polys = list(tris)                      # many 3-vertex polygons
+                    else:
+                        polys = fill_polygons(loops)
                 shade = tuple(c * 0.75 for c in t.color[:3]) if obj_colors else flat
                 for p in polys:
                     fill.append(to3(p))
@@ -2285,6 +2339,9 @@ class LiveSectionAnalyzer(QDockWidget):
 
         self._sync_targets()
         active = [t for t in self.targets if t.checked]
+        busy = not quick                                   # wait cursor for the full (slow) update
+        if busy:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
 
         plane_type, normal, plane_base, center_pos = self.get_plane()
         flip = self.chk_mirror_bg.isChecked()
@@ -2416,6 +2473,9 @@ class LiveSectionAnalyzer(QDockWidget):
         except Exception as e:
             App.Console.PrintError(f"Section Error: {str(e)}\n")
 
+        if busy:
+            QApplication.restoreOverrideCursor()
+
         # Plain Part::Feature objects need no recompute; just clear the "touched" flag.
         for feat in [self.section_feat, self.edge_feat, self.hatch_feat] + [t.bg_feat for t in active]:
             if feat is not None:
@@ -2447,6 +2507,17 @@ class LiveSectionAnalyzer(QDockWidget):
         if not doc or not any(t.checked for t in self.targets):
             return
 
+        progress = None
+        try:
+            progress = QProgressDialog("Freezing section ...", None, 0, 0, Gui.getMainWindow())
+            progress.setWindowTitle("Live Section Analyzer")
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setCancelButton(None)
+            progress.show()
+            QApplication.processEvents()
+        except Exception:
+            progress = None
         try:
             # Make sure everything is up to date (including hatch)
             self._timer.stop()
@@ -2527,6 +2598,8 @@ class LiveSectionAnalyzer(QDockWidget):
                 copied_objects.append(hatch_copy)
 
             if not copied_objects:
+                if progress is not None:
+                    progress.close()
                 QMessageBox.warning(None, "Warning", "No section elements found to copy!")
                 try:
                     doc.removeObject(self.frozen_group.Name)
@@ -2547,6 +2620,8 @@ class LiveSectionAnalyzer(QDockWidget):
                 obj.purgeTouched()
             self.frozen_group.purgeTouched()
 
+            if progress is not None:
+                progress.close()
             QMessageBox.information(
                 None,
                 "Success",
@@ -2562,6 +2637,8 @@ class LiveSectionAnalyzer(QDockWidget):
             App.Console.PrintError(f"Freeze Error: {str(e)}\n")
             QMessageBox.critical(None, "Error", f"Error while freezing section:\n{str(e)}")
         finally:
+            if progress is not None:
+                progress.close()
             self.schedule_update()                     # back to the live (mesh or exact) view
 
     # ------------------------------------------------------------------
@@ -2629,6 +2706,7 @@ class LiveSectionAnalyzer(QDockWidget):
 
         self._slice_cache.clear()
         self._loop_cache.clear()
+        self._tri_cache.clear()
 
         if self._mode == "task":
             # The Tasks panel owns the form; the unused dock can simply go.
