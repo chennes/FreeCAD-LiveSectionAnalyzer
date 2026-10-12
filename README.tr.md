@@ -14,6 +14,7 @@
 - **Birden fazla obje ve montaj** – kesit alınacak parçaları listeden seçin; düzlem ekranda gördüğünüz her şeyi kırpar, böylece parçalar arası boşlukları kontrol edebilirsiniz. App::Part ve link içindeki parçalar montaj konumunu korur.
 - **Seçenekler kendi dock penceresinde** – kaydırılabilir, açılır bölümler; istediğin yere sürükleyebilir veya yüzdürebilirsin. Tasks paneli ölçü alma gibi işler için boş kalır (`PANEL_MODE = "task"` seçenekleri yine Tasks paneline koyar).
 - **Hızlı GPU kırpma** (Coin3D `SoClipPlane`) – her harekette boolean kesme yapılmaz; karmaşık parçalarda bile akıcıdır.
+- **Mesh tabanlı kesit** (varsayılan açık) – kontur, tarama ve dolgu OpenCascade yerine tessellation'dan üretilir; büyük montajlarda ve eğrili parçalarda düzlemi sürüklemek akıcı kalır (17 parçalı pompa montajında güncelleme başına 10–30 ms). Her parça kendi tarama yönünü alır. *Freeze Section* her zaman gerçek geometri kullanır; canlı görünümde gerçek motoru istersen seçeneği kapat.
 - Gerçek kesitten (`Shape.slice`) üretilen **kesit konturu, dolgu ve tarama**; renk, çizgi kalınlığı, tarama aralığı ve nokta boyutu ayarlanabilir.
 - **Mirror Background** – parçanın karşı yarısını gösterir. Sadece kesme düzlemi değişir; obje hareket etmez.
 - **Freeze Section** – mevcut görünümü bağımsız FreeCAD nesneleri olarak bir grupta saklar.
