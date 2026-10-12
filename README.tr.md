@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo.png" alt="FreeCAD Clipping Macro" width="220"></p>
+
 # FreeCAD LiveSectionAnalyzer
 
 **FreeCAD için etkileşimli, gerçek zamanlı kesit görünümü** – katı modeli bir düzlemle kırpın, düzlemi 3B gizmo ile sürükleyin ve hareket ettikçe güncellenen taramalı kesiti görün.

@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo.png" alt="FreeCAD Clipping Macro" width="220"></p>
+
 # FreeCAD LiveSectionAnalyzer
 
 **Interactive, real-time section views for FreeCAD** – clip a solid with a plane, drag the plane with a 3D gizmo, and get a hatched cross-section that updates as you move.

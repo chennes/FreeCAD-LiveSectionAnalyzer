@@ -9,6 +9,7 @@
 - Mesh-based section (*Section engine (experimental)* checkbox, `MESH_SECTION` for the start state): outline, hatch and fill are built from the tessellation with numpy and drawn as Coin nodes, no OpenCascade slicing. Hatch and fill also follow the plane while dragging; mesh tolerance is coarse while dragging and fine afterwards. Curves are polygonal at coarse tolerance. Freeze Section still uses exact geometry.
 - Each sectioned object is hatched at its own angle and spacing (`HATCH_STYLES`: 45, 135, 0, 90 degrees...), in the exact section, the mesh section and Freeze alike, so touching parts can be told apart. A single entry, e.g. `((45.0, 1.0),)`, gives the old one-direction hatch. The hatch lines are now anchored at the origin (a pattern that does not shift with the object), and the exact hatch costs one boolean per object instead of one in total.
 - The options now open in their own dock window on the right side of the main window (`PANEL_MODE = "dock"`, `DOCK_AREA`), so the Tasks panel stays free for measuring and other tools while a section is open. `PANEL_MODE = "task"` brings the old Tasks-panel behaviour back.
+- Project logo: shown in the README, and a small icon (embedded in the macro, no extra file needed) in the panel header and on the dock window. Sources are in `docs/` (`logo.png`, `icon.png`).
 - Changing a color in the panel now refreshes the mesh section immediately.
 - `tests/test_mesh_core.py`: unit tests of the numpy core (`python3 tests/test_mesh_core.py`).
 
