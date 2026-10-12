@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
+  <name>LiveSectionAnalyzer</name>
+  <description>Interactive, real-time section analysis for FreeCAD: move the section plane with a slider or a 3D gizmo, with GPU clipping, hatch, per-object colors and a fast mesh-based section for large assemblies. Freeze keeps a real-geometry copy.</description>
+  <version>0.5.0</version>
+  <date>2026-10-12</date>
+  <maintainer email="CHANGE-ME@example.com">Sedat Kuran</maintainer>
+  <license file="LICENSE">MIT</license>
+  <url type="repository" branch="main">https://github.com/sedatkrn/FreeCAD-LiveSectionAnalyzer</url>
+  <url type="bugtracker">https://github.com/sedatkrn/FreeCAD-LiveSectionAnalyzer/issues</url>
+  <url type="readme">https://github.com/sedatkrn/FreeCAD-LiveSectionAnalyzer/blob/main/README.md</url>
+  <icon>docs/icon.png</icon>
+  <content>
+    <macro>
+      <name>LiveSectionAnalyzer</name>
+      <file>macro/LiveSectionAnalyzer.FCMacro</file>
+      <description>Live section plane with GPU clipping, hatch and mesh-based fast section</description>
+      <icon>docs/icon.png</icon>
+      <tag>section</tag>
+      <tag>clipping</tag>
+      <tag>assembly</tag>
+    </macro>
+  </content>
+</package>
