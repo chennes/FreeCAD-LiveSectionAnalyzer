@@ -105,12 +105,17 @@ HATCH_STYLES = ((45.0, 1.0), (135.0, 1.0), (0.0, 1.5), (90.0, 1.5))
 
 # Max cached mesh sections (all objects together).
 MESH_CACHE_SIZE = 128
+# Safety limits (the first tick of "Mesh-based section" tessellates every checked object)
+MESH_FINE_MAX_TRIS = 40000      # fine mesh only when the coarse one has at most this many triangles
+MESH_MAX_FILL_POINTS = 40000    # no fill polygons for sections with more loop points than this
+MESH_FINE_BUDGET_S = 1.5        # per update: no further fine tessellations after this much time
 
 
 # ----------------------------------------------------------------------
 # Mesh section core: pure numpy, no FreeCAD (tests/test_mesh_core.py runs it alone)
 # ----------------------------------------------------------------------
 # BEGIN MESH CORE
+MESH_MAX_HOLES = 400            # more holes per outer loop: no keyhole bridging (fill skipped)
 def mesh_weld(V, T, sid, tol):
     """Merge coincident vertices of a tessellation.
 
@@ -335,7 +340,7 @@ def _bridge_holes(outer, holes):
         E1 = np.concatenate([np.roll(p, -1, axis=0) for p in segs])
         order = np.argsort(((poly - M) ** 2).sum(axis=1))
         qi = int(order[0])
-        for cand in order.tolist():
+        for cand in order[:64].tolist():
             if not _crosses(M, poly[cand], E0, E1):
                 qi = cand
                 break
@@ -358,6 +363,8 @@ def fill_polygons(loops):
             continue
         outer = _orient(L, True)
         hs = [_orient(loops[h], False) for h in holes_of.get(i, [])]
+        if len(hs) > MESH_MAX_HOLES:
+            continue                                  # too many holes to bridge quickly
         out.append(_bridge_holes(outer, hs) if hs else outer)
     return out
 
@@ -1954,11 +1961,16 @@ class LiveSectionAnalyzer(QDockWidget):
         return (HAS_NP and self.mesh_switch is not None and hasattr(self, "chk_mesh")
                 and self.chk_mesh.isChecked())
 
-    @staticmethod
-    def _mesh_for(t, fine):
+    def _mesh_for(self, t, fine):
         """Welded tessellation (V, T, gap) of a target, coarse or fine; built once and cached."""
         lvl = 1 if fine else 0
         m = t.meshes.get(lvl)
+        if m is None and fine:
+            coarse = self._mesh_for(t, False)
+            if (len(coarse[1]) > MESH_FINE_MAX_TRIS
+                    or time.perf_counter() - self._mesh_t0 > MESH_FINE_BUDGET_S):
+                t.meshes[1] = coarse                  # heavy part / out of time: keep the coarse mesh
+                return coarse
         if m is None:
             diag = max(t.bbox.DiagonalLength, 1e-9)
             tol = max(diag * (MESH_TOL_FINE_REL if fine else MESH_TOL_REL), 1e-5)
@@ -2054,6 +2066,7 @@ class LiveSectionAnalyzer(QDockWidget):
         flat = tuple(self.section_feat.ViewObject.ShapeColor[:3])
 
         edges, hatch, fill, fill_cols = [], [], [], []
+        self._mesh_t0 = perf()
         for t in active:
             if not self._plane_hits_bbox(t.bbox, normal, d):
                 self._skipped += 1
@@ -2075,7 +2088,8 @@ class LiveSectionAnalyzer(QDockWidget):
 
             if want_fill and loops:
                 t0 = perf()
-                polys = fill_polygons(loops)
+                npts = sum(len(L) for L in loops)
+                polys = fill_polygons(loops) if npts <= MESH_MAX_FILL_POINTS else []
                 shade = tuple(c * 0.75 for c in t.color[:3]) if obj_colors else flat
                 for p in polys:
                     fill.append(to3(p))
@@ -2266,6 +2280,7 @@ class LiveSectionAnalyzer(QDockWidget):
         tm = {"slice": 0.0, "faces": 0.0, "fill": 0.0, "edges": 0.0, "hatch": 0.0, "bg": 0.0}
         self._skipped = 0
         self._meshed = 0
+        self._mesh_t0 = time.perf_counter()
 
         # While dragging the slider we only do the cheap parts
         quick = self.slider.isSliderDown() or self._gizmo_dragging

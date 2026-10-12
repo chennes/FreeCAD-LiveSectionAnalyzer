@@ -2,6 +2,7 @@
 
 ## Unreleased (v0.5-experimental)
 
+- Mesh section safety limits (`MESH_FINE_MAX_TRIS`, `MESH_FINE_BUDGET_S`, `MESH_MAX_FILL_POINTS`, `MESH_MAX_HOLES`): heavy parts (threads, large bodies) keep the coarse mesh instead of a fine tessellation, huge sections skip the fill, keyhole search is bounded. Fixes FreeCAD freezing when the option was ticked on a big assembly.
 - `DEBUG_TIMING`: per-update timings (background / slice / faces / fill / edges / hatch) in the Report view.
 - Objects the plane does not touch are skipped by a bounding-box test before slicing (~3x faster on a 60-solid demo).
 - Fast drag preview: slow objects are outlined from their tessellation (numpy) while the plane moves; the exact section follows when you let go. `FAST_PREVIEW_MS` sets the threshold. Needs numpy (bundled with FreeCAD); falls back to exact slicing without it.
