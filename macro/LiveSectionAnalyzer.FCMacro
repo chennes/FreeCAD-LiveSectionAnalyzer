@@ -394,23 +394,28 @@ def fill_trapezoids(loops):
     x0, y0, x1, y1 = lo[:, 0], lo[:, 1], hi[:, 0], hi[:, 1]
     slope = (x1 - x0) / (y1 - y0)
     ys = np.unique(np.concatenate((y0, y1)))
+    sa, sb = ys[:-1], ys[1:]
     out = []
-    for k in range(len(ys) - 1):
-        a, b = ys[k], ys[k + 1]
-        act = np.flatnonzero((y0 <= a) & (y1 >= b))
-        if len(act) < 2:
+    block = max(1, int(2e7 // len(x0)))                     # slabs per block (bounds the memory)
+    for k0 in range(0, len(sa), block):
+        a, b = sa[k0:k0 + block], sb[k0:k0 + block]
+        si, ei = np.nonzero((y0[None, :] <= a[:, None]) & (y1[None, :] >= b[:, None]))
+        if not len(si):
             continue
-        xa = x0[act] + (a - y0[act]) * slope[act]
-        xb = x0[act] + (b - y0[act]) * slope[act]
-        o = np.argsort(xa + xb, kind="stable")
-        xa, xb = xa[o], xb[o]
-        m = len(xa) // 2 * 2
-        la, ra, lb, rb = xa[0:m:2], xa[1:m:2], xb[0:m:2], xb[1:m:2]
-        q = np.empty((len(la), 4, 2))
-        q[:, 0, 0], q[:, 0, 1] = la, a
-        q[:, 1, 0], q[:, 1, 1] = ra, a
-        q[:, 2, 0], q[:, 2, 1] = rb, b
-        q[:, 3, 0], q[:, 3, 1] = lb, b
+        xa = x0[ei] + (a[si] - y0[ei]) * slope[ei]
+        xb = x0[ei] + (b[si] - y0[ei]) * slope[ei]
+        o = np.lexsort((xa + xb, si))                       # left to right inside every slab
+        si, xa, xb = si[o], xa[o], xb[o]
+        cnt = np.bincount(si, minlength=len(a))
+        rank = np.arange(len(si)) - (np.cumsum(cnt) - cnt)[si]
+        li = np.flatnonzero((rank % 2 == 0) & (rank + 1 < cnt[si]))
+        if not len(li):
+            continue
+        ri = li + 1
+        q = np.empty((len(li), 4, 2))
+        q[:, 0, 0], q[:, 1, 0], q[:, 2, 0], q[:, 3, 0] = xa[li], xa[ri], xb[ri], xb[li]
+        q[:, 0, 1] = q[:, 1, 1] = a[si[li]]
+        q[:, 2, 1] = q[:, 3, 1] = b[si[li]]
         out.append(q)
     return np.concatenate(out) if out else np.zeros((0, 4, 2))
 
@@ -2124,7 +2129,7 @@ class LiveSectionAnalyzer(QDockWidget):
         obj_colors = self.chk_obj_colors.isChecked()
         flat = tuple(self.section_feat.ViewObject.ShapeColor[:3])
 
-        edges, hatch, fill, fill_cols = [], [], [], []
+        edges, hatch, fill, fill_cols, fill_counts = [], [], [], [], []
         self._mesh_t0 = perf()
         for t in active:
             if not self._plane_hits_bbox(t.bbox, normal, d):
@@ -2148,17 +2153,20 @@ class LiveSectionAnalyzer(QDockWidget):
             if want_fill and loops:
                 t0 = perf()
                 npts = sum(len(L) for L in loops)
-                polys = []
+                shade = tuple(c * 0.75 for c in t.color[:3]) if obj_colors else flat
                 if npts <= MESH_MAX_FILL_POINTS:
                     if fine and npts <= MESH_MAX_QUAD_POINTS:
                         tkey = (t.key, round(normal.x, 6), round(normal.y, 6), round(normal.z, 6), round(d, 4))
-                        polys = list(self._fill_quads(tkey, loops))      # convex quads: no tearing
+                        quads = self._fill_quads(tkey, loops)             # convex quads: no tearing
+                        if len(quads):
+                            fill.append(to3(quads.reshape(-1, 2)))        # one transform for all quads
+                            fill_counts.extend([4] * len(quads))
+                            fill_cols.extend([shade] * len(quads))
                     else:
-                        polys = fill_polygons(loops)                     # drag / huge sections
-                shade = tuple(c * 0.75 for c in t.color[:3]) if obj_colors else flat
-                for p in polys:
-                    fill.append(to3(p))
-                    fill_cols.append(shade)
+                        for p in fill_polygons(loops):                    # drag / huge sections
+                            fill.append(to3(p))
+                            fill_counts.append(len(p))
+                            fill_cols.append(shade)
                 tm["faces"] += perf() - t0
 
             if want_hatch and loops:
@@ -2172,7 +2180,12 @@ class LiveSectionAnalyzer(QDockWidget):
         t0 = perf()
         try:
             fcol, fcoords, fset = self.mesh_nodes["fill"]
-            self._fill_node(fcoords, fset, fill)
+            if fill:
+                fpts = np.concatenate(fill)
+                fcoords.point.setValues(0, len(fpts), fpts.tolist())
+                fset.numVertices.setValues(0, len(fill_counts), fill_counts)
+            fcoords.point.setNum(sum(len(a) for a in fill))
+            fset.numVertices.setNum(len(fill_counts))
             if fill_cols:
                 fcol.rgb.setValues(0, len(fill_cols), fill_cols)
             fcol.rgb.setNum(len(fill_cols))

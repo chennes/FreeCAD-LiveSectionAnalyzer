@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Faster section fill in the finished mesh view: the quads are transformed and handed to Coin as one array instead of thousands of small ones; `fill_trapezoids` is vectorized.
+
 ## 0.5.1 – 2026-10-12
 
 - Fine tessellation is now skipped for parts whose coarse mesh was slow or large (`MESH_FINE_MAX_TRIS`, `MESH_FINE_PREDICT`), and the tolerance never goes below `MESH_TOL_MIN` (0.01 mm). Fixes multi-minute stalls on threaded parts seen with FreeCAD 1.1.4 (OCC 7.8).
