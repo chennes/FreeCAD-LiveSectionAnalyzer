@@ -1418,6 +1418,26 @@ class LiveSectionAnalyzer(QDockWidget):
         self.chk_gizmo.stateChanged.connect(self.on_gizmo_toggled)
         layout.addWidget(self.chk_gizmo)
 
+        # Tilt: turns the plane about its two in-plane axes (0 / 0 = axis-aligned)
+        tilt_layout = QHBoxLayout()
+        self.lbl_tilt_a, self.lbl_tilt_b = QLabel("Tilt A:"), QLabel("Tilt B:")
+        self.spin_tilt_a, self.spin_tilt_b = QDoubleSpinBox(), QDoubleSpinBox()
+        for lbl, sp in ((self.lbl_tilt_a, self.spin_tilt_a), (self.lbl_tilt_b, self.spin_tilt_b)):
+            sp.setRange(-89.0, 89.0)
+            sp.setDecimals(1)
+            sp.setSingleStep(5.0)
+            sp.setSuffix(" \u00b0")
+            sp.setToolTip("Tilts the section plane about one of its in-plane axes. "
+                          "0 \u00b0 / 0 \u00b0 is the plain XY / XZ / YZ plane.")
+            sp.valueChanged.connect(self.schedule_update)
+            tilt_layout.addWidget(lbl)
+            tilt_layout.addWidget(sp)
+        self.btn_tilt_reset = QPushButton("Reset")
+        self.btn_tilt_reset.setToolTip("Back to the axis-aligned plane")
+        self.btn_tilt_reset.clicked.connect(self.reset_tilt)
+        tilt_layout.addWidget(self.btn_tilt_reset)
+        layout.addLayout(tilt_layout)
+
         # Section engine (part of the Section Plane group)
         mesh_ok = HAS_NP and self.mesh_switch is not None
         self.chk_mesh = QCheckBox("Mesh-based section (fast, curves are polygonal)")
@@ -1790,12 +1810,12 @@ class LiveSectionAnalyzer(QDockWidget):
             self.gizmo.set_visible(self.chk_gizmo.isChecked())
 
     def plane_axes(self, plane_type):
-        """In-plane axis u and half extents (along u and along u x normal)."""
-        if plane_type == "YZ":
-            return App.Vector(0, 1, 0), self.y_len / 2 * 1.1, self.z_len / 2 * 1.1
-        if plane_type == "XZ":
-            return App.Vector(0, 0, 1), self.z_len / 2 * 1.1, self.x_len / 2 * 1.1
-        return App.Vector(1, 0, 0), self.x_len / 2 * 1.1, self.y_len / 2 * 1.1
+        """In-plane axis u and half extents (along u and along w) of the current plane."""
+        u, w = self._plane_frame[0], self._plane_frame[1]
+
+        def half(v):
+            return (abs(v.x) * self.x_len + abs(v.y) * self.y_len + abs(v.z) * self.z_len) / 2 * 1.1
+        return u, half(u), half(w)
 
     def sync_gizmo(self, plane_type, normal, plane_base):
         if not self.gizmo or self.gizmo.dragging:
@@ -1907,18 +1927,46 @@ class LiveSectionAnalyzer(QDockWidget):
     # ------------------------------------------------------------------
     # Geometry helpers
     # ------------------------------------------------------------------
+    def _tilt_text(self):
+        ta, tb = self.spin_tilt_a.value(), self.spin_tilt_b.value()
+        if abs(ta) < 1e-9 and abs(tb) < 1e-9:
+            return ""
+        return "_tilt_%g_%g" % (ta, tb)
+
+    def reset_tilt(self):
+        for sp in (self.spin_tilt_a, self.spin_tilt_b):
+            sp.blockSignals(True)
+            sp.setValue(0.0)
+            sp.blockSignals(False)
+        self.schedule_update()
+
     def get_plane(self):
-        """Returns (plane_type, normal, plane_base, center_pos)."""
+        """Returns (plane_type, normal, plane_base, center_pos).
+
+        The plane goes through the bounding-box centre moved by `offset` along its normal.
+        The tilt angles turn it about the two in-plane axes of the chosen base plane; the
+        resulting in-plane frame is kept in self._plane_frame = (u, w, normal, d).
+        """
         offset_val = self.offset_spin.value()
         c = self.bbox.Center
         if self.radio_yz.isChecked():
-            center_pos = c.x + offset_val
-            return "YZ", App.Vector(1, 0, 0), App.Vector(center_pos, c.y, c.z), center_pos
-        if self.radio_xz.isChecked():
-            center_pos = c.y + offset_val
-            return "XZ", App.Vector(0, 1, 0), App.Vector(c.x, center_pos, c.z), center_pos
-        center_pos = c.z + offset_val
-        return "XY", App.Vector(0, 0, 1), App.Vector(c.x, c.y, center_pos), center_pos
+            ptype, n0, u0, w0 = "YZ", App.Vector(1, 0, 0), App.Vector(0, 1, 0), App.Vector(0, 0, 1)
+        elif self.radio_xz.isChecked():
+            ptype, n0, u0, w0 = "XZ", App.Vector(0, 1, 0), App.Vector(1, 0, 0), App.Vector(0, 0, 1)
+        else:
+            ptype, n0, u0, w0 = "XY", App.Vector(0, 0, 1), App.Vector(1, 0, 0), App.Vector(0, 1, 0)
+        ta, tb = self.spin_tilt_a.value(), self.spin_tilt_b.value()
+        names = {"YZ": ("Y", "Z"), "XZ": ("X", "Z"), "XY": ("X", "Y")}[ptype]
+        self.lbl_tilt_a.setText("Tilt about %s:" % names[0])
+        self.lbl_tilt_b.setText("Tilt about %s:" % names[1])
+        n, u, w = App.Vector(n0), App.Vector(u0), App.Vector(w0)
+        if abs(ta) > 1e-9 or abs(tb) > 1e-9:
+            rot = App.Rotation(w0, tb).multiply(App.Rotation(u0, ta))
+            n, u, w = rot.multVec(n0), rot.multVec(u0), rot.multVec(w0)
+        plane_base = App.Vector(c.x + n.x * offset_val, c.y + n.y * offset_val, c.z + n.z * offset_val)
+        self._plane_frame = (u, w, n, n.dot(plane_base))
+        center_pos = plane_base.dot(n0)                      # position along the base axis
+        return ptype, n, plane_base, center_pos
 
     def set_clip(self, normal, plane_base, flip=False):
         """Position the GPU clip plane (cheap). flip=True keeps the other half."""
@@ -1941,12 +1989,8 @@ class LiveSectionAnalyzer(QDockWidget):
         # or the -normal side when flipped
         cutter.translate(App.Vector(-size / 2, -size / 2, -size if flip else 0))
 
-        if plane_type == "YZ":
-            cutter.rotate(App.Vector(0, 0, 0), App.Vector(0, 1, 0), 90)
-        elif plane_type == "XZ":
-            cutter.rotate(App.Vector(0, 0, 0), App.Vector(1, 0, 0), -90)
-
-        cutter.translate(plane_base)
+        rot = App.Rotation(App.Vector(0, 0, 1), normal)         # local +Z -> plane normal
+        cutter.Placement = App.Placement(plane_base, rot).multiply(cutter.Placement)
         return shape.cut(cutter)
 
     @staticmethod
@@ -1957,8 +2001,12 @@ class LiveSectionAnalyzer(QDockWidget):
         tol = max(bb.DiagonalLength, 1.0) * 1e-6
         return abs(n.x * c.x + n.y * c.y + n.z * c.z - d) <= r + tol
 
+    @staticmethod
+    def _nkey(n):
+        return (round(n.x, 5), round(n.y, 5), round(n.z, 5))
+
     def _slice_cached(self, t, plane_type, normal, plane_base):
-        return (t.key, plane_type, round(normal.dot(plane_base), 4)) in self._slice_cache
+        return (t.key, plane_type, self._nkey(normal), round(normal.dot(plane_base), 4)) in self._slice_cache
 
     @staticmethod
     def _tessellation(t):
@@ -2006,6 +2054,13 @@ class LiveSectionAnalyzer(QDockWidget):
         if plane_type == "XZ":
             return np.array((1.0, 0.0, 0.0)), np.array((0.0, 0.0, 1.0))
         return np.array((1.0, 0.0, 0.0)), np.array((0.0, 1.0, 0.0))
+
+    def _basis_for(self, plane_type):
+        """Current in-plane axes (u, w) as numpy vectors, tilt included."""
+        fr = getattr(self, "_plane_frame", None)
+        if fr is None:
+            return self._plane_basis(plane_type)
+        return (np.array((fr[0].x, fr[0].y, fr[0].z)), np.array((fr[1].x, fr[1].y, fr[1].z)))
 
     def _mesh_active(self):
         return (HAS_NP and self.mesh_switch is not None and hasattr(self, "chk_mesh")
@@ -2113,7 +2168,7 @@ class LiveSectionAnalyzer(QDockWidget):
         """
         perf = time.perf_counter
         d = normal.dot(plane_base)
-        U, W = self._plane_basis(plane_type)
+        U, W = self._basis_for(plane_type)
         basis = np.stack((U, W), axis=1)                                   # (3, 2)
         base3 = np.array((normal.x, normal.y, normal.z)) * d + np.array(
             (pose.Base.x, pose.Base.y, pose.Base.z))
@@ -2230,7 +2285,7 @@ class LiveSectionAnalyzer(QDockWidget):
         if not self._plane_hits_bbox(t.bbox, normal, d):
             self._skipped += 1
             return []
-        key = (t.key, plane_type, round(d, 4))
+        key = (t.key, plane_type, self._nkey(normal), round(d, 4))
         wires = self._slice_cache.get(key)
         if wires is None:
             t0 = time.perf_counter()
@@ -2282,13 +2337,16 @@ class LiveSectionAnalyzer(QDockWidget):
         """
         section = Part.Compound(faces)
         bb = section.BoundBox
+        U, W, N, d = self._plane_frame
+        corners = [App.Vector(x, y, z) for x in (bb.XMin, bb.XMax)
+                   for y in (bb.YMin, bb.YMax) for z in (bb.ZMin, bb.ZMax)]
+        us = [c.dot(U) for c in corners]
+        vs = [c.dot(W) for c in corners]
+        u_min, u_max, v_min, v_max = min(us) - 2, max(us) + 2, min(vs) - 2, max(vs) + 2
+        origin = N * d
 
-        if plane_type == "YZ":
-            u_min, u_max, v_min, v_max = bb.YMin - 2, bb.YMax + 2, bb.ZMin - 2, bb.ZMax + 2
-        elif plane_type == "XZ":
-            u_min, u_max, v_min, v_max = bb.XMin - 2, bb.XMax + 2, bb.ZMin - 2, bb.ZMax + 2
-        else:
-            u_min, u_max, v_min, v_max = bb.XMin - 2, bb.XMax + 2, bb.YMin - 2, bb.YMax + 2
+        def pt(u, v):
+            return origin + U * u + W * v
 
         a = math.radians(angle)
         nu, nv = math.cos(a), math.sin(a)             # line normal
@@ -2309,8 +2367,8 @@ class LiveSectionAnalyzer(QDockWidget):
             s = j * spacing
             bu, bv = s * nu + t0 * wu, s * nv + t0 * wv
             lines.append(Part.makeLine(
-                self._pt(plane_type, center_pos, bu - half * wu, bv - half * wv),
-                self._pt(plane_type, center_pos, bu + half * wu, bv + half * wv)))
+                pt(bu - half * wu, bv - half * wv),
+                pt(bu + half * wu, bv + half * wv)))
             j += 1
 
         if not lines:
@@ -2552,7 +2610,8 @@ class LiveSectionAnalyzer(QDockWidget):
             plane_type, normal, plane_base, center_pos = self.get_plane()
             offset_val = self.offset_spin.value()
 
-            group_name = f"Frozen_Section_{plane_type}_Offset_{offset_val:.1f}"
+            tilt = self._tilt_text()
+            group_name = f"Frozen_Section_{plane_type}{tilt}_Offset_{offset_val:.1f}"
 
             # Delete old frozen group
             if self.frozen_group and doc.getObject(self.frozen_group.Name):
@@ -2567,7 +2626,7 @@ class LiveSectionAnalyzer(QDockWidget):
                     pass
 
             self.frozen_group = doc.addObject("App::DocumentObjectGroup", group_name)
-            self.frozen_group.Label = f"Frozen Section ({plane_type}, Offset: {offset_val:.1f} mm)"
+            self.frozen_group.Label = f"Frozen Section ({plane_type}{tilt.replace('_', ' ')}, Offset: {offset_val:.1f} mm)"
 
             copied_objects = []
 
