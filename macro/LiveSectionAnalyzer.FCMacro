@@ -628,7 +628,16 @@ class PlaneGizmo:
     COLOR = (1.0, 0.55, 0.0)
     COLOR_HOT = (1.0, 0.9, 0.2)
 
-    def __init__(self, view, size, on_start, on_drag, on_end):
+    RING_RES = 72
+    RING_COLORS = ((0.95, 0.15, 0.15), (0.2, 0.4, 1.0))
+    RING_HOT = ((1.0, 0.6, 0.6), (0.6, 0.75, 1.0))
+
+    def __init__(self, view, size, on_start, on_drag, on_end,
+                 on_rot_start=None, on_rot_drag=None, on_rot_end=None):
+        self.on_rot_start, self.on_rot_drag, self.on_rot_end = on_rot_start, on_rot_drag, on_rot_end
+        self.rot_active = None                    # 0 / 1 while a ring is being dragged
+        self._rot = None
+        self.fixed_axis = App.Vector(0, 0, 1)
         self.view = view
         self.viewer = view.getViewer()
         self.widget = view.graphicsView().viewport()
@@ -718,6 +727,42 @@ class PlaneGizmo:
         outline.addChild(ls)
         self.set_extents(L, L)
 
+        # rotation rings (world-oriented, centred on the plane origin)
+        self.ring_r = L * 0.85
+        rings = coin.SoAnnotation()
+        self.switch.addChild(rings)
+        rpick = coin.SoPickStyle()
+        rpick.style.setValue(coin.SoPickStyle.UNPICKABLE)
+        rings.addChild(rpick)
+        rlm = coin.SoLightModel()
+        rlm.model.setValue(coin.SoLightModel.BASE_COLOR)
+        rings.addChild(rlm)
+        self.rtf = coin.SoTransform()
+        rings.addChild(self.rtf)
+        self.ring_col, self.ring_coords, self.ring_handle = [], [], []
+        for k in range(2):
+            sep = coin.SoSeparator()
+            rings.addChild(sep)
+            col = coin.SoBaseColor()
+            col.rgb.setValue(*self.RING_COLORS[k])
+            sep.addChild(col)
+            rds = coin.SoDrawStyle()
+            rds.lineWidth.setValue(3.0)
+            sep.addChild(rds)
+            co = coin.SoCoordinate3()
+            sep.addChild(co)
+            ln = coin.SoLineSet()
+            ln.numVertices.setValue(self.RING_RES + 1)
+            sep.addChild(ln)
+            ht = coin.SoTransform()
+            sep.addChild(ht)
+            ball = coin.SoSphere()
+            ball.radius.setValue(L * 0.05)
+            sep.addChild(ball)
+            self.ring_col.append(col)
+            self.ring_coords.append(co)
+            self.ring_handle.append(ht)
+
         # arrow, drawn on top of everything
         arrow = coin.SoSeparator()
         grp.addChild(arrow)
@@ -750,8 +795,27 @@ class PlaneGizmo:
                (half_u, 0, half_w), (-half_u, 0, half_w)]
         self.coords.point.setValues(0, 4, pts)
 
-    def set_pose(self, origin, normal, u_axis):
+    def _ring_defs(self):
+        """(axis, first basis direction) of the two rotation rings."""
+        return ((self.u_axis, self.normal), (self.fixed_axis, self.u_axis))
+
+    def _update_rings(self):
+        self.rtf.translation.setValue(self.origin.x, self.origin.y, self.origin.z)
+        for k, (a, e1) in enumerate(self._ring_defs()):
+            e2 = a.cross(e1)
+            R = self.ring_r
+            pts = []
+            for i in range(self.RING_RES + 1):
+                t = 2 * math.pi * i / self.RING_RES
+                c, sn = math.cos(t) * R, math.sin(t) * R
+                pts.append((e1.x * c + e2.x * sn, e1.y * c + e2.y * sn, e1.z * c + e2.z * sn))
+            self.ring_coords[k].point.setValues(0, len(pts), pts)
+            self.ring_handle[k].translation.setValue(e1.x * R, e1.y * R, e1.z * R)
+
+    def set_pose(self, origin, normal, u_axis, fixed_axis=None):
         """origin/normal/u_axis are App.Vector; local X -> u, local Y -> normal."""
+        if fixed_axis is not None:
+            self.fixed_axis = App.Vector(fixed_axis)
         self.normal = App.Vector(normal)
         n = App.Vector(normal)
         u = App.Vector(u_axis)
@@ -768,6 +832,7 @@ class PlaneGizmo:
     def _set_origin(self, origin):
         self.origin = App.Vector(origin)
         self.tf.translation.setValue(origin.x, origin.y, origin.z)
+        self._update_rings()
 
     def set_visible(self, flag):
         self.switch.whichChild.setValue(coin.SO_SWITCH_ALL if flag else coin.SO_SWITCH_NONE)
@@ -807,6 +872,44 @@ class PlaneGizmo:
             elif s_ != sign:
                 return False
         return True
+
+    def hit_ring(self, x, y):
+        """Index of the rotation ring under the pixel, or None."""
+        if self.on_rot_drag is None:
+            return None
+        vv = self._volume()
+        w, h = self.widget.width(), self.widget.height()
+        best, best_d = None, self.PICK_PIXELS * 0.7
+        for k, (a, e1) in enumerate(self._ring_defs()):
+            e2 = a.cross(e1)
+            px = []
+            for i in range(self.RING_RES + 1):
+                t = 2 * math.pi * i / self.RING_RES
+                p = self.origin + e1 * (math.cos(t) * self.ring_r) + e2 * (math.sin(t) * self.ring_r)
+                sc = vv.projectToScreen(coin.SbVec3f(p.x, p.y, p.z)).getValue()
+                px.append((sc[0] * w, (1.0 - sc[1]) * h))
+            d = min(self._dist_to_segment(x, y, px[i], px[i + 1]) for i in range(len(px) - 1))
+            if d < best_d:
+                best, best_d = k, d
+        return best
+
+    def _ring_angle(self, x, y):
+        """Angle (rad) of the mouse ray hit on the ring plane, in the grabbed basis."""
+        a, e1, e2 = self._rot["basis"]
+        p0, p1 = self._volume().projectPointToLine(self._norm(x, y))
+        q0 = App.Vector(*p0.getValue())
+        d = App.Vector(*p1.getValue()) - q0
+        den = d.dot(a)
+        if abs(den) < 1e-6 * max(d.Length, 1e-9):
+            return None
+        t = (self._rot["center"] - q0).dot(a) / den
+        v = q0 + d * t - self._rot["center"]
+        return math.atan2(v.dot(e2), v.dot(e1))
+
+    def _set_ring_hot(self, k, flag):
+        for i in range(2):
+            on = flag and i == k
+            self.ring_col[i].rgb.setValue(*(self.RING_HOT[i] if on else self.RING_COLORS[i]))
 
     def hit_test(self, x, y):
         vv = self._volume()
@@ -874,6 +977,21 @@ class PlaneGizmo:
             if not self.is_visible():
                 return False
             x, y = self._pos(ev)
+            k = self.hit_ring(x, y)
+            if k is not None:
+                a, e1 = self._ring_defs()[k]
+                self._rot = {"k": k, "center": App.Vector(self.origin),
+                             "basis": (App.Vector(a), App.Vector(e1), a.cross(e1)), "last": None,
+                             "total": 0.0}
+                ang = self._ring_angle(x, y)
+                if ang is None:
+                    self._rot = None
+                    return False
+                self._rot["last"] = ang
+                self.rot_active = k
+                self._set_ring_hot(k, True)
+                self.on_rot_start(k)
+                return True
             if not self.hit_test(x, y):
                 return False
             t = self._axis_param(x, y, self.origin)
@@ -888,6 +1006,15 @@ class PlaneGizmo:
 
         if et == QEvent.MouseMove:
             x, y = self._pos(ev)
+            if self.rot_active is not None:
+                ang = self._ring_angle(x, y)
+                if ang is not None:
+                    dlt = ang - self._rot["last"]
+                    dlt = (dlt + math.pi) % (2 * math.pi) - math.pi      # unwrap
+                    self._rot["last"] = ang
+                    self._rot["total"] += dlt
+                    self.on_rot_drag(self.rot_active, math.degrees(self._rot["total"]))
+                return True
             if self.dragging:
                 t = self._axis_param(x, y, self._anchor)
                 if t is not None:
@@ -896,7 +1023,16 @@ class PlaneGizmo:
                 return True
             if self.is_visible() and not ev.buttons():
                 self._set_hot(self.hit_test(x, y))
+                self._set_ring_hot(self.hit_ring(x, y), True) if self.hit_ring(x, y) is not None \
+                    else self._set_ring_hot(-1, False)
             return False
+
+        if et == QEvent.MouseButtonRelease and self.rot_active is not None:
+            self.rot_active = None
+            self._rot = None
+            self._set_ring_hot(-1, False)
+            self.on_rot_end()
+            return True
 
         if et == QEvent.MouseButtonRelease and self.dragging:
             self.dragging = False
@@ -1797,7 +1933,8 @@ class LiveSectionAnalyzer(QDockWidget):
         try:
             view = Gui.ActiveDocument.ActiveView
             size = max(self.x_len, self.y_len, self.z_len) * 0.18
-            self.gizmo = PlaneGizmo(view, size, self._gizmo_start, self._gizmo_drag, self._gizmo_end)
+            self.gizmo = PlaneGizmo(view, size, self._gizmo_start, self._gizmo_drag, self._gizmo_end,
+                                    self._rot_start, self._rot_drag, self._rot_end)
             self.gizmo.set_visible(self.chk_gizmo.isChecked())
         except Exception as e:
             App.Console.PrintWarning(f"Gizmo unavailable: {e}\n")
@@ -1821,7 +1958,7 @@ class LiveSectionAnalyzer(QDockWidget):
         if not self.gizmo or self.gizmo.dragging:
             return
         u, hu, hw = self.plane_axes(plane_type)
-        self.gizmo.set_pose(plane_base, normal, u)
+        self.gizmo.set_pose(plane_base, normal, u, getattr(self, "_plane_w0", None))
         self.gizmo.set_extents(hu, hw)
 
     def _gizmo_start(self):
@@ -1838,6 +1975,22 @@ class LiveSectionAnalyzer(QDockWidget):
         self._sync_slider()
         self.schedule_update()
         return self.offset_spin.value() - self._gizmo_start_offset
+
+    def _rot_start(self, k):
+        self._gizmo_dragging = True
+        sp = (self.spin_tilt_a, self.spin_tilt_b)[k]
+        self._rot_start_val = sp.value()
+
+    def _rot_drag(self, k, deg):
+        sp = (self.spin_tilt_a, self.spin_tilt_b)[k]
+        sp.blockSignals(True)
+        sp.setValue(max(sp.minimum(), min(sp.maximum(), self._rot_start_val + deg)))
+        sp.blockSignals(False)
+        self.schedule_update()
+
+    def _rot_end(self):
+        self._gizmo_dragging = False
+        self.schedule_update()
 
     def _gizmo_end(self):
         self._gizmo_dragging = False
@@ -1964,6 +2117,7 @@ class LiveSectionAnalyzer(QDockWidget):
             rot = App.Rotation(w0, tb).multiply(App.Rotation(u0, ta))
             n, u, w = rot.multVec(n0), rot.multVec(u0), rot.multVec(w0)
         plane_base = App.Vector(c.x + n.x * offset_val, c.y + n.y * offset_val, c.z + n.z * offset_val)
+        self._plane_w0 = w0
         self._plane_frame = (u, w, n, n.dot(plane_base))
         center_pos = plane_base.dot(n0)                      # position along the base axis
         return ptype, n, plane_base, center_pos
