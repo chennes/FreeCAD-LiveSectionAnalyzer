@@ -629,7 +629,7 @@ class PlaneGizmo:
     COLOR_HOT = (1.0, 0.9, 0.2)
 
     RING_RES = 12                             # segments of the short arc
-    ARC_HALF_DEG = 15.0                       # arc = handle +- this
+    ARC_HALF_DEG = 22.0                       # arc = handle +- this
     HANDLE_DEG = (55.0, 35.0)                 # handle position on each ring (off the arrow)
     RING_COLORS = ((0.95, 0.15, 0.15), (0.2, 0.4, 1.0))
     RING_HOT = ((1.0, 0.6, 0.6), (0.6, 0.75, 1.0))
@@ -730,7 +730,7 @@ class PlaneGizmo:
         self.set_extents(L, L)
 
         # rotation rings (world-oriented, centred on the plane origin)
-        self.ring_rs = (L * 0.8, L * 0.8)
+        self.ring_rs = (L * 1.0, L * 1.0)
         rings = coin.SoAnnotation()
         self.switch.addChild(rings)
         rpick = coin.SoPickStyle()
@@ -854,9 +854,25 @@ class PlaneGizmo:
         vp = rm.getViewportRegion()
         return rm.getCamera().getViewVolume(vp.getViewportAspectRatio())
 
+    def _squeeze(self):
+        """In a portrait viewport Coin shrinks the picture by width/height (ADJUST_CAMERA);
+        the view volume does not include that, so it is applied here."""
+        rm = self.viewer.getSoRenderManager()
+        return min(rm.getViewportRegion().getViewportAspectRatio(), 1.0)
+
     def _norm(self, x, y):
-        return coin.SbVec2f(x / max(self.widget.width(), 1),
-                            1.0 - y / max(self.widget.height(), 1))
+        a = max(self._squeeze(), 1e-3)
+        nx = x / max(self.widget.width(), 1)
+        ny = 1.0 - y / max(self.widget.height(), 1)
+        return coin.SbVec2f(0.5 + (nx - 0.5) / a, 0.5 + (ny - 0.5) / a)
+
+    def _scr(self, p, vv=None):
+        """World point -> widget pixels (origin top-left)."""
+        vv = vv or self._volume()
+        s = vv.projectToScreen(coin.SbVec3f(p.x, p.y, p.z)).getValue()
+        a = self._squeeze()
+        return ((0.5 + (s[0] - 0.5) * a) * self.widget.width(),
+                (1.0 - (0.5 + (s[1] - 0.5) * a)) * self.widget.height())
 
     @staticmethod
     def _dist_to_segment(x, y, a, b):
@@ -890,8 +906,8 @@ class PlaneGizmo:
         best, best_d = None, self.PICK_PIXELS * 0.8
         for k in range(2):
             p = self.origin + self._ring_point(k, self.HANDLE_DEG[k])
-            sc = vv.projectToScreen(coin.SbVec3f(p.x, p.y, p.z)).getValue()
-            d = math.hypot(x - sc[0] * w, y - (1.0 - sc[1]) * h)
+            sx, sy = self._scr(p, vv)
+            d = math.hypot(x - sx, y - sy)
             if d < best_d:
                 best, best_d = k, d
         return best
@@ -918,9 +934,7 @@ class PlaneGizmo:
         c = self._rot["center"]
 
         def scr(t):
-            p = c + e1 * (math.cos(t) * R) + e2 * (math.sin(t) * R)
-            sc = vv.projectToScreen(coin.SbVec3f(p.x, p.y, p.z)).getValue()
-            return sc[0] * w, (1.0 - sc[1]) * h
+            return self._scr(c + e1 * (math.cos(t) * R) + e2 * (math.sin(t) * R), vv)
 
         best_t = math.radians(self.HANDLE_DEG[self._rot["k"]])
         h_ = 0.05
@@ -941,8 +955,7 @@ class PlaneGizmo:
         w, h = self.widget.width(), self.widget.height()
 
         def to_px(p):
-            s = vv.projectToScreen(coin.SbVec3f(p.x, p.y, p.z)).getValue()
-            return s[0] * w, (1.0 - s[1]) * h
+            return self._scr(p, vv)
 
         # arrow
         a = to_px(self.origin - self.normal * self.reach)
