@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Tilted section plane: two angle spin boxes (rotation about the plane's in-plane axes) plus Reset; works with mesh and exact engines, hatch, cut solid and freeze. Offset is measured along the tilted normal.
+- Tilted section plane: red and blue rotation rings on the gizmo (drag to tilt) and two angle spin boxes (rotation about the plane's in-plane axes) plus Reset; works with mesh and exact engines, hatch, cut solid and freeze. Offset is measured along the tilted normal.
 - Faster section fill in the finished mesh view: the quads are transformed and handed to Coin as one array instead of thousands of small ones; `fill_trapezoids` is vectorized.
 
 ## 0.5.1 – 2026-10-12
