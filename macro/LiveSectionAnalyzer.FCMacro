@@ -628,7 +628,9 @@ class PlaneGizmo:
     COLOR = (1.0, 0.55, 0.0)
     COLOR_HOT = (1.0, 0.9, 0.2)
 
-    RING_RES = 72
+    RING_RES = 12                             # segments of the short arc
+    ARC_HALF_DEG = 15.0                       # arc = handle +- this
+    HANDLE_DEG = (55.0, 35.0)                 # handle position on each ring (off the arrow)
     RING_COLORS = ((0.95, 0.15, 0.15), (0.2, 0.4, 1.0))
     RING_HOT = ((1.0, 0.6, 0.6), (0.6, 0.75, 1.0))
 
@@ -728,7 +730,7 @@ class PlaneGizmo:
         self.set_extents(L, L)
 
         # rotation rings (world-oriented, centred on the plane origin)
-        self.ring_rs = (L * 1.12, L * 1.4)         # different radii: the rings never overlap
+        self.ring_rs = (L * 0.8, L * 0.8)
         rings = coin.SoAnnotation()
         self.switch.addChild(rings)
         rpick = coin.SoPickStyle()
@@ -757,7 +759,7 @@ class PlaneGizmo:
             ht = coin.SoTransform()
             sep.addChild(ht)
             ball = coin.SoSphere()
-            ball.radius.setValue(L * 0.05)
+            ball.radius.setValue(L * 0.06)
             sep.addChild(ball)
             self.ring_col.append(col)
             self.ring_coords.append(co)
@@ -799,18 +801,24 @@ class PlaneGizmo:
         """(axis, first basis direction) of the two rotation rings."""
         return ((self.u_axis, self.normal), (self.fixed_axis, self.u_axis))
 
+    def _ring_point(self, k, deg):
+        a, e1 = self._ring_defs()[k]
+        e2 = a.cross(e1)
+        t = math.radians(deg)
+        R = self.ring_rs[k]
+        return e1 * (math.cos(t) * R) + e2 * (math.sin(t) * R)
+
     def _update_rings(self):
         self.rtf.translation.setValue(self.origin.x, self.origin.y, self.origin.z)
-        for k, (a, e1) in enumerate(self._ring_defs()):
-            e2 = a.cross(e1)
-            R = self.ring_rs[k]
+        for k in range(2):
+            hd = self.HANDLE_DEG[k]
             pts = []
             for i in range(self.RING_RES + 1):
-                t = 2 * math.pi * i / self.RING_RES
-                c, sn = math.cos(t) * R, math.sin(t) * R
-                pts.append((e1.x * c + e2.x * sn, e1.y * c + e2.y * sn, e1.z * c + e2.z * sn))
+                v = self._ring_point(k, hd - self.ARC_HALF_DEG + 2 * self.ARC_HALF_DEG * i / self.RING_RES)
+                pts.append((v.x, v.y, v.z))
             self.ring_coords[k].point.setValues(0, len(pts), pts)
-            self.ring_handle[k].translation.setValue(e1.x * R, e1.y * R, e1.z * R)
+            h = self._ring_point(k, hd)
+            self.ring_handle[k].translation.setValue(h.x, h.y, h.z)
 
     def set_pose(self, origin, normal, u_axis, fixed_axis=None):
         """origin/normal/u_axis are App.Vector; local X -> u, local Y -> normal."""
@@ -874,21 +882,16 @@ class PlaneGizmo:
         return True
 
     def hit_ring(self, x, y):
-        """Index of the rotation ring under the pixel, or None."""
-        if self.on_rot_drag is None:
+        """Index of the rotation handle (ball) under the pixel, or None."""
+        if self.on_rot_drag is None or not self.is_visible():
             return None
         vv = self._volume()
         w, h = self.widget.width(), self.widget.height()
-        best, best_d = None, self.PICK_PIXELS * 0.7
-        for k, (a, e1) in enumerate(self._ring_defs()):
-            e2 = a.cross(e1)
-            px = []
-            for i in range(self.RING_RES + 1):
-                t = 2 * math.pi * i / self.RING_RES
-                p = self.origin + e1 * (math.cos(t) * self.ring_rs[k]) + e2 * (math.sin(t) * self.ring_rs[k])
-                sc = vv.projectToScreen(coin.SbVec3f(p.x, p.y, p.z)).getValue()
-                px.append((sc[0] * w, (1.0 - sc[1]) * h))
-            d = min(self._dist_to_segment(x, y, px[i], px[i + 1]) for i in range(len(px) - 1))
+        best, best_d = None, self.PICK_PIXELS * 0.8
+        for k in range(2):
+            p = self.origin + self._ring_point(k, self.HANDLE_DEG[k])
+            sc = vv.projectToScreen(coin.SbVec3f(p.x, p.y, p.z)).getValue()
+            d = math.hypot(x - sc[0] * w, y - (1.0 - sc[1]) * h)
             if d < best_d:
                 best, best_d = k, d
         return best
@@ -919,13 +922,7 @@ class PlaneGizmo:
             sc = vv.projectToScreen(coin.SbVec3f(p.x, p.y, p.z)).getValue()
             return sc[0] * w, (1.0 - sc[1]) * h
 
-        best_t, best_d = 0.0, 1e18
-        for i in range(72):
-            t = 2 * math.pi * i / 72
-            px_, py_ = scr(t)
-            dd = math.hypot(px_ - x, py_ - y)
-            if dd < best_d:
-                best_t, best_d = t, dd
+        best_t = math.radians(self.HANDLE_DEG[self._rot["k"]])
         h_ = 0.05
         (ax, ay), (bx, by) = scr(best_t - h_), scr(best_t + h_)
         L = math.hypot(bx - ax, by - ay)
