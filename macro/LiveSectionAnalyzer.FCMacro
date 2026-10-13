@@ -728,7 +728,7 @@ class PlaneGizmo:
         self.set_extents(L, L)
 
         # rotation rings (world-oriented, centred on the plane origin)
-        self.ring_r = L * 0.85
+        self.ring_rs = (L * 1.12, L * 1.4)         # different radii: the rings never overlap
         rings = coin.SoAnnotation()
         self.switch.addChild(rings)
         rpick = coin.SoPickStyle()
@@ -803,7 +803,7 @@ class PlaneGizmo:
         self.rtf.translation.setValue(self.origin.x, self.origin.y, self.origin.z)
         for k, (a, e1) in enumerate(self._ring_defs()):
             e2 = a.cross(e1)
-            R = self.ring_r
+            R = self.ring_rs[k]
             pts = []
             for i in range(self.RING_RES + 1):
                 t = 2 * math.pi * i / self.RING_RES
@@ -885,7 +885,7 @@ class PlaneGizmo:
             px = []
             for i in range(self.RING_RES + 1):
                 t = 2 * math.pi * i / self.RING_RES
-                p = self.origin + e1 * (math.cos(t) * self.ring_r) + e2 * (math.sin(t) * self.ring_r)
+                p = self.origin + e1 * (math.cos(t) * self.ring_rs[k]) + e2 * (math.sin(t) * self.ring_rs[k])
                 sc = vv.projectToScreen(coin.SbVec3f(p.x, p.y, p.z)).getValue()
                 px.append((sc[0] * w, (1.0 - sc[1]) * h))
             d = min(self._dist_to_segment(x, y, px[i], px[i + 1]) for i in range(len(px) - 1))
@@ -893,18 +893,46 @@ class PlaneGizmo:
                 best, best_d = k, d
         return best
 
-    def _ring_angle(self, x, y):
+    def _ring_angle(self, x, y, grazing_ok=False):
         """Angle (rad) of the mouse ray hit on the ring plane, in the grabbed basis."""
         a, e1, e2 = self._rot["basis"]
         p0, p1 = self._volume().projectPointToLine(self._norm(x, y))
         q0 = App.Vector(*p0.getValue())
         d = App.Vector(*p1.getValue()) - q0
         den = d.dot(a)
-        if abs(den) < 1e-6 * max(d.Length, 1e-9):
+        if abs(den) < (1e-6 if grazing_ok else 0.25) * max(d.Length, 1e-9):
             return None
         t = (self._rot["center"] - q0).dot(a) / den
         v = q0 + d * t - self._rot["center"]
         return math.atan2(v.dot(e2), v.dot(e1))
+
+    def _start_tangent(self, x, y):
+        """Edge-on ring: map mouse motion along the ring's screen tangent to an angle."""
+        a, e1, e2 = self._rot["basis"]
+        vv = self._volume()
+        w, h = self.widget.width(), self.widget.height()
+        R = self.ring_rs[self._rot["k"]]
+        c = self._rot["center"]
+
+        def scr(t):
+            p = c + e1 * (math.cos(t) * R) + e2 * (math.sin(t) * R)
+            sc = vv.projectToScreen(coin.SbVec3f(p.x, p.y, p.z)).getValue()
+            return sc[0] * w, (1.0 - sc[1]) * h
+
+        best_t, best_d = 0.0, 1e18
+        for i in range(72):
+            t = 2 * math.pi * i / 72
+            px_, py_ = scr(t)
+            dd = math.hypot(px_ - x, py_ - y)
+            if dd < best_d:
+                best_t, best_d = t, dd
+        h_ = 0.05
+        (ax, ay), (bx, by) = scr(best_t - h_), scr(best_t + h_)
+        L = math.hypot(bx - ax, by - ay)
+        if L < 1e-3:
+            L = 1.0
+            bx, by, ax, ay = 1.0, 0.0, 0.0, 0.0
+        self._rot["tan"] = ((bx - ax) / L, (by - ay) / L, max(L / (2 * h_), 1e-3), x, y)
 
     def _set_ring_hot(self, k, flag):
         for i in range(2):
@@ -985,9 +1013,9 @@ class PlaneGizmo:
                              "total": 0.0}
                 ang = self._ring_angle(x, y)
                 if ang is None:
-                    self._rot = None
-                    return False
-                self._rot["last"] = ang
+                    self._start_tangent(x, y)          # ring seen edge-on: drag along its screen tangent
+                else:
+                    self._rot["last"] = ang
                 self.rot_active = k
                 self._set_ring_hot(k, True)
                 self.on_rot_start(k)
@@ -1007,6 +1035,11 @@ class PlaneGizmo:
         if et == QEvent.MouseMove:
             x, y = self._pos(ev)
             if self.rot_active is not None:
+                if "tan" in self._rot:
+                    tx, ty, ppr, x0, y0 = self._rot["tan"]
+                    self._rot["total"] = ((x - x0) * tx + (y - y0) * ty) / ppr
+                    self.on_rot_drag(self.rot_active, math.degrees(self._rot["total"]))
+                    return True
                 ang = self._ring_angle(x, y)
                 if ang is not None:
                     dlt = ang - self._rot["last"]
