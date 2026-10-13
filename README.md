@@ -29,6 +29,7 @@ I will maintain the addon.
 - **Multiple objects and assemblies** – pick the parts to section from a list; the plane clips everything you see, so you can check clearances between parts. Parts inside App::Part containers and links keep their assembly position.
 - **Options in their own dock window** – scrollable, collapsible sections, drag it anywhere or float it; the Tasks panel stays free for measuring (`PANEL_MODE = "task"` puts the options back into the Tasks panel).
 - **Fast GPU clipping** (Coin3D `SoClipPlane`) – the model is not re-cut with a boolean on every move, so even complex parts stay responsive.
+- **Tilted section plane** – tilt the plane with the two rotation handles on the gizmo (red / blue balls) or the angle boxes; works with hatch, fill, mesh/exact engines and *Freeze Section*.
 - **Mesh-based section** (on by default) – outline, hatch and fill are built from the tessellation instead of OpenCascade, so dragging the plane through large assemblies and curved parts stays fluid (10–30 ms per update on a 17-part pump assembly). Each part gets its own hatch direction. *Freeze Section* always uses exact geometry; untick the option to use the exact engine live.
 - **Section outline, fill and hatch** generated from the real cross-section (`Shape.slice`), with adjustable colors, line width, hatch spacing and point size.
 - **Mirror Background** – keep the opposite half of the part. Only the clipping plane changes; the object never moves.
